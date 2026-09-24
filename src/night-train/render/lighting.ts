@@ -21,6 +21,8 @@ export interface Lighting {
   cloudShade: RGB;
   /** 0 at night, 1 in full daylight. */
   daylight: number;
+  /** Strength (0..1) of direct sunlight, apart from the diffuse sky light. */
+  direct: number;
   /** Street lamps and lit windows. */
   lamps: number;
   starVisibility: number;
@@ -135,6 +137,7 @@ export function computeLighting(world: World): Lighting {
     cloudLit,
     cloudShade,
     daylight,
+    direct: smoothstep(-1, 10, alt) * (1 - overcast) * (1 - gloom),
     lamps: Math.max(smoothstep(4, -3, alt), clamp01(gloom * 1.4 - 0.4)),
     starVisibility:
       smoothstep(-5, -15, alt) * (1 - terrain.lightPollution * 0.55) * (1 - w.mist * 0.6),

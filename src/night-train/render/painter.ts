@@ -34,6 +34,15 @@ export class Painter {
   /** Art pixels per meter at the current distance. */
   s = 1;
   lateral = 1;
+  /** Height (m) of the ground under what is being drawn, above the surrounding land. */
+  base = 0;
+  /**
+   * Direction toward the sun in view terms: `right` along screen x, `up`, and
+   * `back` toward the viewer (so a surface facing us is lit when it is positive).
+   */
+  readonly sun = { right: 0, up: 1, back: 0 };
+  /** Strength (0..1) of direct sunlight. */
+  direct = 0;
   private windowProbability = 0;
   private hourBucket = 0;
 
@@ -54,6 +63,23 @@ export class Painter {
     const hour = world.clock.hour;
     this.windowProbability = light.lamps * occupancy(hour);
     this.hourBucket = world.clock.days * 8;
+    const sun = cam.toCamera(world.sky.sun);
+    this.sun.right = sun.right;
+    this.sun.up = sun.up;
+    this.sun.back = -sun.forward;
+    this.direct = light.direct;
+  }
+
+  /**
+   * Relative brightness of a surface facing (nx, ny up, nz toward the viewer):
+   * light from the sky above, plus the sun on the faces turned to it.
+   */
+  surfaceLight(nx: number, ny: number, nz: number): number {
+    const sun = this.sun;
+    const direct = this.direct;
+    const sky = 0.5 + 0.5 * ny;
+    const diffuse = Math.max(0, nx * sun.right + ny * sun.up + nz * sun.back);
+    return (1 - direct) * (0.72 + 0.36 * sky) + direct * (0.48 + 0.2 * sky + 0.78 * diffuse);
   }
 
   at(lateral: number): this {
