@@ -51,11 +51,15 @@ function blendInto(p: Px, r: number, g: number, b: number, a: number): void {
 }
 
 /**
- * Fine surface texture. Along the track it is box-filtered by the motion blur,
- * so at speed it smears into streaks that still vary from row to row.
+ * Fine surface texture at middle distances. Along the track it is box-filtered
+ * by the motion blur, so at speed it smears into streaks that still vary from
+ * row to row.
  */
 function grain(p: Px, along: number, z: number, foot: number, rowFoot: number, seed: number): void {
-  const lateralDetail = 1 - smoothstep(0.12, 0.7, rowFoot);
+  // Fades out both where the cells shrink below a pixel and, right below the
+  // window, where they would grow into blocks (finer textures take over there).
+  const cellPx = GRAIN_LATERAL / Math.max(1e-4, rowFoot);
+  const lateralDetail = (1 - smoothstep(0.12, 0.7, rowFoot)) * (1 - smoothstep(3, 8, cellPx));
   if (lateralDetail <= 0) {
     return;
   }
