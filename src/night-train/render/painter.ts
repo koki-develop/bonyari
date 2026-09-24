@@ -145,6 +145,54 @@ export class Painter {
     this.view.set(Math.round(x), Math.round(y), this.shade.rgb(c));
   }
 
+  /** Sets one pixel to a lit color scaled by `k`. */
+  dotK(x: number, y: number, c: RGB, k: number): void {
+    this.view.set(Math.round(x), Math.round(y), this.shade.color(c[0] * k, c[1] * k, c[2] * k));
+  }
+
+  /**
+   * A filled disc of a lit color; with `dome`, shaded as a rounded surface
+   * lit from the sun's side, otherwise as a flat face toward the viewer.
+   */
+  disc(cx: number, cy: number, radius: number, c: RGB, dome = false): void {
+    const flat = this.surfaceLight(0, 0, 1);
+    for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) {
+      for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
+        const dx = (x + 0.5 - cx) / radius;
+        const dy = (y + 0.5 - cy) / radius;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > 1) {
+          continue;
+        }
+        const k = dome ? this.surfaceLight(dx, -dy, Math.sqrt(1 - d2)) : flat;
+        this.view.set(x, y, this.shade.color(c[0] * k, c[1] * k, c[2] * k));
+      }
+    }
+  }
+
+  /** An emissive disc: a lamp lens, brightest at its center. */
+  lightDisc(cx: number, cy: number, radius: number, c: RGB): void {
+    for (let y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y++) {
+      for (let x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x++) {
+        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / radius;
+        if (d <= 1) {
+          this.lightDot(x, y, c, 1 - d * d * 0.35);
+        }
+      }
+    }
+  }
+
+  /** A vertical round post or pipe, shaded across its width. */
+  cylinder(cx: number, top: number, bottom: number, width: number, c: RGB): void {
+    const half = Math.max(0.5, width / 2);
+    for (let x = Math.floor(cx - half); x < Math.ceil(cx + half); x++) {
+      const u = Math.max(-1, Math.min(1, (x + 0.5 - cx) / half)) * 0.9;
+      const k = this.surfaceLight(u, 0, Math.sqrt(1 - u * u));
+      const color = this.shade.color(c[0] * k, c[1] * k, c[2] * k);
+      this.view.fillRect(x, Math.round(top), 1, Math.round(bottom) - Math.round(top), color);
+    }
+  }
+
   /** Fills a rect with an emissive color (blended by `a`). */
   lightRect(x0: number, y0: number, x1: number, y1: number, c: RGB, a = 1): void {
     const k = this.shade.lightStrength();
