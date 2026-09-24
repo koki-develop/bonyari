@@ -1,1 +1,1 @@
-document.querySelector<HTMLDivElement>('#app')!.textContent = 'Hello, world!'
+document.querySelector<HTMLDivElement>("#app")!.textContent = "Hello, world!";
