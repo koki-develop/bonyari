@@ -20,6 +20,9 @@ export const HALF_GAUGE = 0.53;
 
 /** Grassy verge (m) between the embankment and the first fields. */
 const VERGE = 3;
+/** Size (m) of the armour stones along a seawall. */
+const STONE_ALONG = 1.3;
+const STONE_LATERAL = 1.0;
 /** Offset (m) of each lane's center from the road's center line. */
 const LANE = 1.7;
 /** Size (m) of the patches that make up yards and lots. */
@@ -157,6 +160,11 @@ export class GroundRenderer {
   private higanbana = 0;
   /** What `land` found at the last pixel, for the snow over it. */
   private plotPath = 0;
+  /** Sunlight for shading the relief of stones: direction in view terms and strength. */
+  private sunRight = 0;
+  private sunUp = 1;
+  private sunForward = 0;
+  private direct = 0;
   private roadOffset = Infinity;
 
   render(
@@ -199,6 +207,10 @@ export class GroundRenderer {
     // Sunlight on the snow: drifts are lit on the sun's side, blue in their shade.
     const sun = cam.toCamera(world.sky.sun);
     const direct = light.direct;
+    this.sunRight = sun.right;
+    this.sunUp = sun.up;
+    this.sunForward = sun.forward;
+    this.direct = direct;
     const glitter = direct * smoothstep(0.5, 1, snow);
     const [gr, gg, gb] = season.grass;
     const [pr, pg, pb] = season.paddy;
@@ -520,15 +532,40 @@ export class GroundRenderer {
       const beach = 6 + 6 * table.sample(table.pines, along);
       if (z > shore - beach) {
         if (shore - embankment < 10) {
-          const stone = hash3(Math.floor(along / 1.2), Math.floor(z / 0.9), 23);
-          const v = 0.75 + stone * 0.4 * (0.4 + 0.6 * detail);
+          // Armour stones: rounded boulders in offset rows, lit on the sun's
+          // side, dark in the crevices; smeared to their average at speed.
+          const row = Math.floor(z / STONE_LATERAL);
+          const shift = hash2(row, 29) * 0.6;
+          const u = along / STONE_ALONG + shift;
+          const cell = Math.floor(u);
+          const hv = hash3(cell, row, 23);
+          // Each stone sits a little off center and has its own size.
+          const fx = u - cell - 0.5 - (hash3(cell, row, 24) - 0.5) * 0.24;
+          const fz = z / STONE_LATERAL - row - 0.5 - (hash3(cell, row, 25) - 0.5) * 0.2;
+          const d2 = (fx * fx + fz * fz) / (0.14 + 0.1 * hv);
+          let k: number;
+          if (d2 < 1) {
+            const nx = fx * 1.6;
+            const nz = fz * 1.6;
+            const ny = Math.sqrt(Math.max(0.05, 1 - nx * nx - nz * nz));
+            const sunlit = Math.max(0, nx * this.sunRight + ny * this.sunUp + nz * this.sunForward);
+            k = (1 - this.direct) * (0.82 + 0.1 * ny) + this.direct * (0.55 + 0.6 * sunlit);
+            k *= 0.85 + 0.3 * hv;
+          } else {
+            k = 0.42;
+          }
+          const sharp = STONE_ALONG / Math.max(STONE_ALONG, foot);
+          const v = 0.78 + (k - 0.78) * sharp;
           set(p, 150 * v, 148 * v, 140 * v);
           const wetStone =
             smoothstep(shore - 2.5, shore, z) * (0.6 + 0.4 * Math.sin(time * 0.9 + along * 0.1));
           blendInto(p, 70, 72, 70, wetStone);
         } else {
-          const n = hash3(Math.floor(along * 2), Math.floor(z * 2), 23) * 16 * detail;
+          // Sand, rippled by the wind in lines along the shore.
+          const n = (cellNoise(along, z, 0.4, 0.25, foot, seed + 23) - 0.5) * 22 * detail;
           set(p, 204 + n, 188 + n, 150 + n);
+          const ripple = pulseCoverage(z + Math.sin(along * 0.15) * 0.4, 0.45, 0.12, rowFoot);
+          blendInto(p, 178, 162, 126, ripple * 0.35 * detail);
           const wetSand = smoothstep(shore - 5, shore - 0.5, z);
           blendInto(p, 150, 136, 108, wetSand * (0.7 + 0.3 * Math.sin(time * 0.9 + along * 0.1)));
         }
