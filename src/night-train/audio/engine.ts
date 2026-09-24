@@ -1,12 +1,12 @@
 import { bump, clamp01, cyclicBump, smoothstep } from "../core/math.ts";
-import { Rng } from "../core/random.ts";
+import { hash2, noise1, Rng } from "../core/random.ts";
 import { crossingActive } from "../sim/crossing.ts";
 import { type Crossing, makeTerrainScratch, RAIL_LENGTH } from "../sim/route.ts";
 import { ONCOMING_CAR_LENGTH, type OncomingTrain } from "../sim/traffic.ts";
 import { AXLES } from "../sim/train.ts";
 import type { World } from "../sim/world.ts";
 import { buildSoundBank, type SoundBank } from "./bank.ts";
-import { chain, filter, impulseResponse } from "./synth.ts";
+import { chain, filter, gainNode, impulseResponse } from "./synth.ts";
 
 const SPEED_OF_SOUND = 343;
 const LOOKAHEAD = 0.15;
@@ -17,6 +17,10 @@ const BELL_LATERAL = 4;
 const BELL_RATE = 2.2;
 /** Share of the physical Doppler shift applied to the crossing bells. */
 const DOPPLER = 0.35;
+/** Fundamental (Hz) of the brake squeal. */
+const SQUEAL_PITCH = 2700;
+/** Speed (m/s) below which the brakes start to squeal. */
+const SQUEAL_SPEED = 6;
 
 interface Loop {
   source: AudioBufferSourceNode;
@@ -51,7 +55,7 @@ export class AudioEngine {
   private hiss!: Loop;
   private rumble!: { osc: OscillatorNode; gain: GainNode };
   private motor!: { a: OscillatorNode; b: OscillatorNode; gain: GainNode };
-  private squeal!: { osc: OscillatorNode; gain: GainNode };
+  private squeal!: { osc: OscillatorNode; band: BiquadFilterNode; gain: GainNode };
   private wind!: Loop;
   private rain!: Loop;
   private waves!: Loop;
@@ -249,19 +253,36 @@ export class AudioEngine {
     b.start();
     this.motor = { a, b, gain: motorGain };
 
+    // Brake squeal: a strident tone rich in harmonics, roughened by the
+    // stick-slip of the shoes on the wheels, with scraping noise around it.
+    // Its pitch wander and on-off chatter are driven from `update`.
     const sq = ctx.createOscillator();
-    sq.frequency.value = 2900;
-    const vib = ctx.createOscillator();
-    vib.frequency.value = 6;
-    const vibDepth = ctx.createGain();
-    vibDepth.gain.value = 25;
-    chain(vib, vibDepth, sq.frequency);
+    sq.setPeriodicWave(
+      ctx.createPeriodicWave(
+        new Float32Array([0, 0, 0.1, 0, 0.05, 0]),
+        new Float32Array([0, 1, 0.6, 0.42, 0.25, 0.14]),
+      ),
+    );
+    sq.frequency.value = SQUEAL_PITCH;
+    const rough = ctx.createGain();
+    rough.gain.value = 1;
+    const chatter = ctx.createBufferSource();
+    chatter.buffer = white;
+    chatter.loop = true;
+    chain(chatter, filter(ctx, "bandpass", 55, 0.7), gainNode(ctx, 16), rough.gain);
+    const scrape = ctx.createBufferSource();
+    scrape.buffer = white;
+    scrape.loop = true;
+    const scrapeBand = filter(ctx, "bandpass", SQUEAL_PITCH, 9);
     const sqGain = ctx.createGain();
     sqGain.gain.value = 0;
-    chain(sq, sqGain, this.trainBus);
+    chain(sq, rough, sqGain);
+    chain(scrape, scrapeBand, gainNode(ctx, 1.6), sqGain);
+    chain(sqGain, filter(ctx, "highpass", 900, 0.7), this.trainBus);
     sq.start();
-    vib.start();
-    this.squeal = { osc: sq, gain: sqGain };
+    chatter.start(ctx.currentTime, this.rng.next() * white.duration * 0.9);
+    scrape.start(ctx.currentTime, this.rng.next() * white.duration * 0.9);
+    this.squeal = { osc: sq, band: scrapeBand, gain: sqGain };
 
     // Air conditioning hum in the car.
     const hum = ctx.createOscillator();
@@ -365,8 +386,7 @@ export class AudioEngine {
     const motorFreq = 60 + v * 30;
     this.motor.a.frequency.setTargetAtTime(motorFreq, now, 0.1);
     this.motor.b.frequency.setTargetAtTime(motorFreq * 1.5, now, 0.1);
-    const squeal = train.phase === "braking" && v < 5 && v > 0.2 ? (1 - v / 5) * 0.012 : 0;
-    this.squeal.gain.gain.setTargetAtTime(squeal, now, 0.15);
+    this.updateSqueal(train.phase === "braking", v, train.stationsVisited, now);
 
     // The glass muffles the outside unless the doors are open.
     this.outsideFilter.frequency.setTargetAtTime(train.doorsOpen ? 9000 : 2000, now, 0.35);
@@ -584,6 +604,35 @@ export class AudioEngine {
           break;
       }
     }
+  }
+
+  /**
+   * The brakes squeal over the last few meters before a stop: the tone breaks
+   * up and returns as the shoes grab and slip, climbs a little as the wheels
+   * slow, and cuts off sharply the moment the train stands.
+   */
+  private updateSqueal(braking: boolean, v: number, stop: number, now: number): void {
+    const { osc, band, gain } = this.squeal;
+    if (!braking || v <= 0.15 || v >= SQUEAL_SPEED) {
+      gain.gain.setTargetAtTime(0, now, v <= 0.15 ? 0.015 : 0.08);
+      return;
+    }
+    // Each stop squeals a little differently, and some barely at all.
+    const seed = this.seed ^ Math.imul(stop + 1, 0x2c1b3c6d);
+    const strength = 0.25 + 0.75 * hash2(stop, this.seed);
+    const pitch =
+      SQUEAL_PITCH *
+      (0.88 + 0.24 * hash2(stop, this.seed ^ 0x51)) *
+      (1 + 0.03 * (1 - v / SQUEAL_SPEED));
+    const wander =
+      (noise1(now * 7, seed) - 0.5) * 0.025 + (noise1(now * 23, seed ^ 7) - 0.5) * 0.008;
+    osc.frequency.setTargetAtTime(pitch * (1 + wander), now, 0.02);
+    band.frequency.setTargetAtTime(pitch * (1 + wander), now, 0.02);
+    const grab = smoothstep(0.3, 0.55, noise1(now * 2.6, seed ^ 3));
+    const fade = smoothstep(SQUEAL_SPEED, SQUEAL_SPEED * 0.55, v);
+    // A last grab just before the stop.
+    const last = v < 0.9 ? 1 : grab;
+    gain.gain.setTargetAtTime(0.009 * strength * fade * last, now, 0.03);
   }
 
   private weatherEvents(world: World, now: number, dt: number, shelter: number): void {

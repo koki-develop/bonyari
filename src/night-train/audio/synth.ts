@@ -140,6 +140,12 @@ export function filter(
   return f;
 }
 
+export function gainNode(ctx: BaseAudioContext, gain: number): GainNode {
+  const g = ctx.createGain();
+  g.gain.value = gain;
+  return g;
+}
+
 /** Connects nodes in series; the last one may be an AudioParam (for modulation). */
 export function chain(...nodes: [AudioNode, ...AudioNode[], AudioNode | AudioParam]): void {
   for (let i = 0; i < nodes.length - 1; i++) {
