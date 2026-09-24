@@ -95,12 +95,16 @@ export function drawPolesAndWires(
   }
 }
 
-/** Concrete noise barrier along viaducts. */
+/**
+ * Concrete noise barrier along viaducts. It stops at `gaps` (platforms), whose
+ * ends are box-filtered like everything else passing close by.
+ */
 export function drawBarrier(
   view: Surface,
   cam: Camera,
   shade: Shade,
   height: (along: number) => number,
+  gaps: readonly Span[],
 ): void {
   const lateral = BARRIER_LATERAL;
   shade.at(lateral);
@@ -114,11 +118,18 @@ export function drawBarrier(
     if (h < 0.2) {
       continue;
     }
+    let cov = 1;
+    for (const gap of gaps) {
+      cov -= intervalCoverage(along, gap.start, gap.end, footprint);
+    }
+    if (cov <= 0.01) {
+      continue;
+    }
     const top = cam.yRail(lateral, h);
     const seam = pulseCoverage(along, 2, 0.08, footprint) * 0.35;
-    column(view, x, top, view.height, r * (1 - seam), g * (1 - seam), b * (1 - seam), 1);
+    column(view, x, top, view.height, r * (1 - seam), g * (1 - seam), b * (1 - seam), cov);
     // Weathered cap.
-    column(view, x, top, top + 1, r * 1.12, g * 1.12, b * 1.12, 1);
+    column(view, x, top, top + 1, r * 1.12, g * 1.12, b * 1.12, cov);
   }
 }
 

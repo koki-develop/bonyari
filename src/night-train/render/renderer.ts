@@ -537,9 +537,17 @@ export class Renderer {
         });
         return;
       }
-      case "barrier":
-        drawBarrier(view, cam, this.shade, (along) => this.table.sample(this.table.barrier, along));
+      case "barrier": {
+        const [a, b] = cam.alongRange(BARRIER_LATERAL, 20);
+        drawBarrier(
+          view,
+          cam,
+          this.shade,
+          (along) => this.table.sample(this.table.barrier, along),
+          world.route.stationsIn(a, b),
+        );
         return;
+      }
       case "tunnels": {
         const [a, b] = cam.alongRange(TUNNEL_LATERAL, 40);
         drawTunnel(
