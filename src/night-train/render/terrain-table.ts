@@ -3,7 +3,9 @@ import { makeTerrainScratch, type Route } from "../sim/route.ts";
 const STEP = 6;
 /** Half-width (m) of the sampled window around the train. */
 const RANGE = 14000;
-const SIZE = Math.ceil((2 * RANGE) / STEP) + 4;
+/** Ring buffer length: a power of two above the window, so indices wrap with a mask. */
+const SIZE = 1 << Math.ceil(Math.log2(Math.ceil((2 * RANGE) / STEP) + 4));
+const MASK = SIZE - 1;
 
 /**
  * Terrain sampled on a regular along-track grid around the train, so per-pixel
@@ -78,6 +80,5 @@ export class TerrainTable {
 }
 
 function ring(k: number): number {
-  const r = k % SIZE;
-  return r < 0 ? r + SIZE : r;
+  return k & MASK;
 }

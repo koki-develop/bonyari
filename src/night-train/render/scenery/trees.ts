@@ -29,6 +29,16 @@ interface Volume {
   ry: number;
 }
 
+/** Reused per-clump arrays for `foliage`, grown as needed. */
+const scratch = {
+  bx: new Float64Array(64),
+  by: new Float64Array(64),
+  br: new Float64Array(64),
+  brs: new Float64Array(64),
+  dy: new Float64Array(64),
+  active: new Int32Array(64),
+};
+
 /**
  * Paints a crown made of overlapping clumps, each shaded as a rounded mass:
  * the frontmost clump at a pixel decides its surface, so the crown reads as
@@ -69,28 +79,83 @@ function foliage(
   const backlit = p.direct * clamp01(-p.sun.back * 1.5);
   // Autumn crowns turn unevenly, some clumps redder, some still yellow.
   const warm = clamp01((color[0] - color[1]) / 90);
-  for (let y = iy0; y <= Math.ceil(y1); y++) {
-    for (let x = ix0; x <= Math.ceil(x1); x++) {
-      const n = hash3(seed, x - ix0, y - iy0);
+  // Per-clump constants, and the clumps that reach the current row.
+  const count = clumps.length;
+  if (scratch.bx.length < count) {
+    const size = Math.max(count, scratch.bx.length * 2);
+    scratch.bx = new Float64Array(size);
+    scratch.by = new Float64Array(size);
+    scratch.br = new Float64Array(size);
+    scratch.brs = new Float64Array(size);
+    scratch.dy = new Float64Array(size);
+    scratch.active = new Int32Array(size);
+  }
+  const { bx, by, br, brs, dy: rowDy, active } = scratch;
+  for (let i = 0; i < count; i++) {
+    const b = clumps[i];
+    bx[i] = b.x;
+    by[i] = b.y;
+    br[i] = b.r;
+    brs[i] = b.r * (b.squash ?? 1);
+  }
+  const covered = p.cover.order;
+  const lateral = p.lateral;
+  // Only pixels inside the clip can be written.
+  const yFrom = Math.max(iy0, view.clipY0);
+  const yTo = Math.min(Math.ceil(y1), view.clipY1 - 1);
+  const xFrom = Math.max(ix0, view.clipX0);
+  const xTo = Math.min(Math.ceil(x1), view.clipX1 - 1);
+  for (let y = yFrom; y <= yTo; y++) {
+    // A clump can only cover pixels of this row if the row crosses it.
+    let n0 = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const dy = (y + 0.5 - by[i]) / brs[i];
+      if (dy * dy <= 1) {
+        rowDy[i] = dy;
+        active[n0++] = i;
+        lo = Math.min(lo, bx[i] - br[i]);
+        hi = Math.max(hi, bx[i] + br[i]);
+      }
+    }
+    if (n0 === 0) {
+      continue;
+    }
+    const xa = Math.max(xFrom, Math.floor(lo) - 1);
+    const xb = Math.min(xTo, Math.ceil(hi) + 1);
+    const coverRow = y * view.width;
+    for (let x = xa; x <= xb; x++) {
+      // Painted over later by something nearer.
+      if (covered[coverRow + x] < lateral) {
+        continue;
+      }
+      let n = -1;
       let best = -1;
       let bestZ = -Infinity;
       let bnx = 0;
       let bny = 0;
       let bnz = 0;
       let bd = 0;
-      for (let i = 0; i < clumps.length; i++) {
-        const b = clumps[i];
-        const sq = b.squash ?? 1;
-        const dx = (x + 0.5 - b.x) / b.r;
-        const dy = (y + 0.5 - b.y) / (b.r * sq);
+      for (let j = 0; j < n0; j++) {
+        const i = active[j];
+        const dx = (x + 0.5 - bx[i]) / br[i];
+        const dy = rowDy[i];
         const d2 = dx * dx + dy * dy;
+        // Outside the clump whatever its rim; the leafy rim is never wider.
+        if (d2 > 1) {
+          continue;
+        }
+        if (n < 0) {
+          n = hash3(seed, x - ix0, y - iy0);
+        }
         // A ragged, leafy rim rather than a clean circle.
         const rim = 1 - 0.3 * ((n * (i + 3) * 7.31) % 1);
         if (d2 > rim * rim) {
           continue;
         }
         const nz = Math.sqrt(Math.max(0, 1 - d2));
-        const z = (b.z ?? 0) + b.r * sq * nz;
+        const z = (clumps[i].z ?? 0) + brs[i] * nz;
         if (z > bestZ) {
           bestZ = z;
           best = i;
@@ -511,6 +576,7 @@ export function drawCedar(p: Painter, o: Scenery): void {
   const layers = Math.max(3, Math.round(height / 3));
   const view = p.view;
   const shade = p.shade;
+  const covered = p.cover.order;
   for (let y = top; y < trunkTop; y++) {
     const t = (y - top) / Math.max(1, trunkTop - top);
     // Tiered cone.
@@ -518,7 +584,18 @@ export function drawCedar(p: Painter, o: Scenery): void {
     const half = (width / 2) * s * t * (tierPos * 0.35 + 0.65) + 0.5;
     // Each tier's upper face catches the light; its underside is in shade.
     const ny = 0.55 - tierPos * 0.9;
+    const coverRow = y * view.width;
     for (let x = Math.floor(cx - half); x <= Math.ceil(cx + half); x++) {
+      // Painted over later by something nearer (and nothing to draw off the view).
+      if (
+        x < 0 ||
+        x >= view.width ||
+        y < 0 ||
+        y >= view.height ||
+        covered[coverRow + x] < o.lateral
+      ) {
+        continue;
+      }
       const n = hash3(o.seed, x - Math.round(cx), y - top);
       const u = clamp01(Math.abs(x + 0.5 - cx) / half) * Math.sign(x + 0.5 - cx);
       const k =

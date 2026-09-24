@@ -4,6 +4,7 @@ import { hash3 } from "../core/random.ts";
 import type { Surface } from "../core/surface.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
+import type { Cover } from "./cover.ts";
 import type { Lighting } from "./lighting.ts";
 import type { Shade } from "./shade.ts";
 
@@ -30,6 +31,8 @@ export class Painter {
   shade!: Shade;
   light!: Lighting;
   world!: World;
+  /** Pixels that nearer layers will paint over later this frame. */
+  cover!: Cover;
   time = 0;
   /** Art pixels per meter at the current distance. */
   s = 1;
@@ -53,8 +56,10 @@ export class Painter {
     light: Lighting,
     world: World,
     time: number,
+    cover: Cover,
   ): void {
     this.view = view;
+    this.cover = cover;
     this.cam = cam;
     this.shade = shade;
     this.light = light;

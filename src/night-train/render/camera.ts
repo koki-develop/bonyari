@@ -119,16 +119,18 @@ export class Camera {
     };
   }
 
-  /** Unit direction (horizon frame) through the center of pixel (x, y). */
-  direction(x: number, y: number): HorizonVector {
+  /**
+   * Unit direction (horizon frame) through the center of pixel (x, y), written
+   * into `out` so per-pixel loops allocate nothing.
+   */
+  direction(x: number, y: number, out: HorizonVector): HorizonVector {
     const right = x + 0.5 - this.cx;
     const forward = this.focal;
     const up = this.horizon - (y + 0.5);
     const len = Math.hypot(right, forward, up);
-    return {
-      e: (-right * this.cosH - forward * this.sinH) / len,
-      n: (right * this.sinH - forward * this.cosH) / len,
-      u: up / len,
-    };
+    out.e = (-right * this.cosH - forward * this.sinH) / len;
+    out.n = (right * this.sinH - forward * this.cosH) / len;
+    out.u = up / len;
+    return out;
   }
 }

@@ -95,6 +95,7 @@ function canopy(t: Span, along: number, lateral: number): number {
 export function drawTunnelHills(p: Painter, tunnels: readonly Span[]): void {
   const { view, cam, shade } = p;
   const F = cam.focal;
+  const covered = p.cover.order;
   const season = p.world.season;
   const snow = p.world.weather.state.snowCover;
   // A mixed wood: stands of evergreens among deciduous trees that turn and go bare.
@@ -125,6 +126,10 @@ export function drawTunnelHills(p: Painter, tunnels: readonly Span[]): void {
         const dy = y + 0.5 - cam.horizon;
         // The portal's walls are drawn with the tunnel; below them lies the ground in front.
         if (EYE_ABOVE_RAIL - (dy * zIn) / F < wallTop) {
+          continue;
+        }
+        // Painted over later by something nearer: the march resumes from here.
+        if (covered[y * view.width + x] !== Infinity) {
           continue;
         }
         while (

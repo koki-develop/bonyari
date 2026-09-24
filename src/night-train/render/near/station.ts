@@ -4,6 +4,7 @@ import { hash3, Rng } from "../../core/random.ts";
 import type { Surface } from "../../core/surface.ts";
 import type { Station } from "../../sim/route.ts";
 import { EYE_ABOVE_RAIL, type Camera } from "../camera.ts";
+import type { Cover } from "../cover.ts";
 import type { Painter } from "../painter.ts";
 import { vendingMachine } from "../scenery/facade.ts";
 import { drawPerson } from "./people.ts";
@@ -86,6 +87,151 @@ export function stationColor(station: Station): RGB {
   return STATION_COLORS[station.seed % STATION_COLORS.length];
 }
 
+/** What a pixel's ray meets at a platform. */
+type PlatformPart = "none" | "floor" | "edgeFace" | "fascia" | "canopy";
+
+/** The part of the platform a pixel's ray meets, with where and how fully. */
+interface PlatformHit {
+  part: PlatformPart;
+  /** Coverage of the pixel along the track. */
+  cov: number;
+  /** Lateral distance (m) and along-track position of the hit. */
+  z: number;
+  along: number;
+  /** Blur footprint (m) along the track at the hit. */
+  foot: number;
+  /** Height (m above the rails) of the hit on a vertical face. */
+  h: number;
+}
+
+const HIT: PlatformHit = { part: "none", cov: 0, z: 0, along: 0, foot: 0, h: 0 };
+
+/**
+ * Casts pixel (x, y) at the platform surface, its edge face, the canopy's
+ * fascia and its underside. Shared by the drawing and the occlusion so both
+ * agree on every pixel.
+ */
+function platformHit(
+  cam: Camera,
+  station: Station,
+  x: number,
+  y: number,
+  out: PlatformHit,
+): PlatformHit {
+  const F = cam.focal;
+  const dy = y + 0.5 - cam.horizon;
+  const dx = x + 0.5 - cam.cx;
+  out.part = "none";
+  out.cov = 0;
+  if (dy > 0) {
+    const z = ((EYE_ABOVE_RAIL - PLATFORM_HEIGHT) * F) / dy;
+    if (z >= PLATFORM_EDGE && z <= PLATFORM_BACK) {
+      const along = cam.pos + (dx * z) / F;
+      const foot = z / F + Math.abs(cam.travel);
+      out.part = "floor";
+      out.cov = intervalCoverage(along, station.start, station.end, foot);
+      out.z = z;
+      out.along = along;
+      out.foot = foot;
+      return out;
+    }
+    if (z < PLATFORM_EDGE) {
+      // Looking down at the platform's edge face.
+      const h = EYE_ABOVE_RAIL - (dy * PLATFORM_EDGE) / F;
+      if (h >= -0.2 && h <= PLATFORM_HEIGHT) {
+        const along = cam.pos + (dx * PLATFORM_EDGE) / F;
+        out.part = "edgeFace";
+        out.cov = intervalCoverage(
+          along,
+          station.start,
+          station.end,
+          PLATFORM_EDGE / F + Math.abs(cam.travel),
+        );
+        out.h = h;
+        out.along = along;
+      }
+    }
+    return out;
+  }
+  const up = -dy;
+  if (up <= 0) {
+    return out;
+  }
+  const z = ((CANOPY_HEIGHT - EYE_ABOVE_RAIL) * F) / up;
+  if (z < PLATFORM_EDGE - 0.3) {
+    // The canopy's front fascia.
+    const h = EYE_ABOVE_RAIL + (up * (PLATFORM_EDGE - 0.3)) / F;
+    if (h >= CANOPY_HEIGHT && h <= CANOPY_HEIGHT + 0.55) {
+      const along = cam.pos + (dx * (PLATFORM_EDGE - 0.3)) / F;
+      out.part = "fascia";
+      out.cov = intervalCoverage(
+        along,
+        station.start + 8,
+        station.end - 8,
+        (PLATFORM_EDGE - 0.3) / F + Math.abs(cam.travel),
+      );
+      out.h = h;
+      out.along = along;
+    }
+    return out;
+  }
+  if (z > CANOPY_BACK) {
+    return out;
+  }
+  const along = cam.pos + (dx * z) / F;
+  const foot = z / F + Math.abs(cam.travel);
+  out.part = "canopy";
+  out.cov = intervalCoverage(along, station.start + 8, station.end - 8, foot);
+  out.z = z;
+  out.along = along;
+  out.foot = foot;
+  return out;
+}
+
+/** Columns [from, to] of a row that can meet the platform; empty when from > to. */
+const ROW_SPAN = { from: 0, to: -1 };
+
+/**
+ * Which columns of row `y` can meet the platform at all. The part a ray meets
+ * depends on the row alone, and along the row the hit moves steadily along
+ * the track, so only the columns over the station (plus a margin for the
+ * blur and rounding) need casting.
+ */
+function platformRow(cam: Camera, station: Station, y: number, width: number): typeof ROW_SPAN {
+  const hit = platformHit(cam, station, 0, y, HIT);
+  ROW_SPAN.from = 0;
+  ROW_SPAN.to = -1;
+  if (hit.part === "none") {
+    return ROW_SPAN;
+  }
+  // Lateral distance of the hit, and how far along the track one column moves it.
+  const z =
+    hit.part === "floor" || hit.part === "canopy"
+      ? hit.z
+      : hit.part === "edgeFace"
+        ? PLATFORM_EDGE
+        : PLATFORM_EDGE - 0.3;
+  const perColumn = z / cam.focal;
+  const margin = perColumn + Math.abs(cam.travel) + 1;
+  const x0 = cam.cx - 0.5 + (station.start - margin - cam.pos) / perColumn;
+  const x1 = cam.cx - 0.5 + (station.end + margin - cam.pos) / perColumn;
+  ROW_SPAN.from = Math.max(0, Math.floor(x0) - 1);
+  ROW_SPAN.to = Math.min(width - 1, Math.ceil(x1) + 1);
+  return ROW_SPAN;
+}
+
+/** Marks the pixels a platform's surface, edge and canopy paint over opaquely. */
+export function coverPlatform(cam: Camera, station: Station, cover: Cover): void {
+  for (let y = 0; y < cover.height; y++) {
+    const { from, to } = platformRow(cam, station, y, cover.width);
+    for (let x = from; x <= to; x++) {
+      if (platformHit(cam, station, x, y, HIT).cov >= 1) {
+        cover.mark(x, y, PLATFORM_BACK);
+      }
+    }
+  }
+}
+
 /**
  * Platform surface, its edge face and the canopy overhead, cast per pixel
  * like the ground. Drawn before the things standing on the platform.
@@ -97,117 +243,72 @@ export function drawPlatform(
   station: Station,
   lamps: number,
 ): void {
-  const F = cam.focal;
   const eyeOverPlatform = EYE_ABOVE_RAIL - PLATFORM_HEIGHT;
   const eyeUnderCanopy = CANOPY_HEIGHT - EYE_ABOVE_RAIL;
   const band = stationColor(station);
   for (let y = 0; y < view.height; y++) {
-    const dy = y + 0.5 - cam.horizon;
-    for (let x = 0; x < view.width; x++) {
-      const dx = x + 0.5 - cam.cx;
-      if (dy > 0) {
-        const z = (eyeOverPlatform * F) / dy;
-        if (z >= PLATFORM_EDGE && z <= PLATFORM_BACK) {
-          const along = cam.pos + (dx * z) / F;
-          const foot = z / F + Math.abs(cam.travel);
-          const cov = intervalCoverage(along, station.start, station.end, foot);
-          if (cov > 0) {
-            shade.at(z);
-            const rowFoot = (z * z) / (eyeOverPlatform * F);
-            let r = SURFACE[0];
-            let g = SURFACE[1];
-            let b = SURFACE[2];
-            const tile = pulseCoverage(along, 0.9, 0.05, foot) * 0.25;
-            r *= 1 - tile;
-            g *= 1 - tile;
-            b *= 1 - tile;
-            const tactile = intervalCoverage(z, 2.45, 2.75, rowFoot);
-            r += (TACTILE[0] - r) * tactile;
-            g += (TACTILE[1] - g) * tactile;
-            b += (TACTILE[2] - b) * tactile;
-            const edge = intervalCoverage(z, PLATFORM_EDGE, 1.9, rowFoot);
-            r += (214 - r) * edge;
-            g += (212 - g) * edge;
-            b += (204 - b) * edge;
-            view.blend(x, y, shade.litR(r), shade.litG(g), shade.litB(b), cov);
-          }
-          continue;
-        }
-        if (z < PLATFORM_EDGE) {
-          // Looking down at the platform's edge face.
-          const h = EYE_ABOVE_RAIL - (dy * PLATFORM_EDGE) / F;
-          if (h >= -0.2 && h <= PLATFORM_HEIGHT) {
-            const along = cam.pos + (dx * PLATFORM_EDGE) / F;
-            const cov = intervalCoverage(
-              along,
-              station.start,
-              station.end,
-              PLATFORM_EDGE / F + Math.abs(cam.travel),
-            );
-            if (cov > 0) {
-              shade.at(PLATFORM_EDGE);
-              const lip = h > PLATFORM_HEIGHT - 0.12 ? 1.5 : h > PLATFORM_HEIGHT - 0.3 ? 0.55 : 0.8;
-              view.blend(
-                x,
-                y,
-                shade.litR(92 * lip),
-                shade.litG(90 * lip),
-                shade.litB(86 * lip),
-                cov,
-              );
-            }
-          }
-        }
-        continue;
-      }
-      // Canopy underside above the platform.
-      const up = -dy;
-      if (up <= 0) {
-        continue;
-      }
-      const z = (eyeUnderCanopy * F) / up;
-      if (z < PLATFORM_EDGE - 0.3) {
-        // The canopy's front fascia.
-        const h = EYE_ABOVE_RAIL + (up * (PLATFORM_EDGE - 0.3)) / F;
-        if (h >= CANOPY_HEIGHT && h <= CANOPY_HEIGHT + 0.55) {
-          const along = cam.pos + (dx * (PLATFORM_EDGE - 0.3)) / F;
-          const cov = intervalCoverage(
-            along,
-            station.start + 8,
-            station.end - 8,
-            (PLATFORM_EDGE - 0.3) / F + Math.abs(cam.travel),
-          );
-          if (cov > 0) {
-            shade.at(PLATFORM_EDGE);
-            const c = h > CANOPY_HEIGHT + 0.4 ? [210, 210, 206] : band;
-            view.blend(x, y, shade.litR(c[0]), shade.litG(c[1]), shade.litB(c[2]), cov);
-          }
-        }
-        continue;
-      }
-      if (z > CANOPY_BACK) {
-        continue;
-      }
-      const along = cam.pos + (dx * z) / F;
-      const foot = z / F + Math.abs(cam.travel);
-      const cov = intervalCoverage(along, station.start + 8, station.end - 8, foot);
+    const { from, to } = platformRow(cam, station, y, view.width);
+    for (let x = from; x <= to; x++) {
+      const hit = platformHit(cam, station, x, y, HIT);
+      const cov = hit.cov;
       if (cov <= 0) {
         continue;
       }
-      shade.at(z);
-      const rowFoot = (z * z) / (eyeUnderCanopy * F);
-      const beam = pulseCoverage(along, 6, 0.25, foot) * 0.3;
-      let r = shade.litR(CANOPY[0] * (1 - beam));
-      let g = shade.litG(CANOPY[1] * (1 - beam));
-      let b = shade.litB(CANOPY[2] * (1 - beam));
-      const tube =
-        (intervalCoverage(z, 3.0, 3.18, rowFoot) + intervalCoverage(z, 5.6, 5.78, rowFoot)) *
-        pulseCoverage(along, 5, 1.25, foot) *
-        (0.35 + 0.65 * lamps);
-      r += (TUBE[0] - r) * tube;
-      g += (TUBE[1] - g) * tube;
-      b += (TUBE[2] - b) * tube;
-      view.blend(x, y, r, g, b, cov);
+      switch (hit.part) {
+        case "floor": {
+          const { z, along, foot } = hit;
+          shade.at(z);
+          const rowFoot = (z * z) / (eyeOverPlatform * cam.focal);
+          let r = SURFACE[0];
+          let g = SURFACE[1];
+          let b = SURFACE[2];
+          const tile = pulseCoverage(along, 0.9, 0.05, foot) * 0.25;
+          r *= 1 - tile;
+          g *= 1 - tile;
+          b *= 1 - tile;
+          const tactile = intervalCoverage(z, 2.45, 2.75, rowFoot);
+          r += (TACTILE[0] - r) * tactile;
+          g += (TACTILE[1] - g) * tactile;
+          b += (TACTILE[2] - b) * tactile;
+          const edge = intervalCoverage(z, PLATFORM_EDGE, 1.9, rowFoot);
+          r += (214 - r) * edge;
+          g += (212 - g) * edge;
+          b += (204 - b) * edge;
+          view.blend(x, y, shade.litR(r), shade.litG(g), shade.litB(b), cov);
+          break;
+        }
+        case "edgeFace": {
+          shade.at(PLATFORM_EDGE);
+          const h = hit.h;
+          const lip = h > PLATFORM_HEIGHT - 0.12 ? 1.5 : h > PLATFORM_HEIGHT - 0.3 ? 0.55 : 0.8;
+          view.blend(x, y, shade.litR(92 * lip), shade.litG(90 * lip), shade.litB(86 * lip), cov);
+          break;
+        }
+        case "fascia": {
+          shade.at(PLATFORM_EDGE);
+          const c = hit.h > CANOPY_HEIGHT + 0.4 ? [210, 210, 206] : band;
+          view.blend(x, y, shade.litR(c[0]), shade.litG(c[1]), shade.litB(c[2]), cov);
+          break;
+        }
+        case "canopy": {
+          const { z, along, foot } = hit;
+          shade.at(z);
+          const rowFoot = (z * z) / (eyeUnderCanopy * cam.focal);
+          const beam = pulseCoverage(along, 6, 0.25, foot) * 0.3;
+          let r = shade.litR(CANOPY[0] * (1 - beam));
+          let g = shade.litG(CANOPY[1] * (1 - beam));
+          let b = shade.litB(CANOPY[2] * (1 - beam));
+          const tube =
+            (intervalCoverage(z, 3.0, 3.18, rowFoot) + intervalCoverage(z, 5.6, 5.78, rowFoot)) *
+            pulseCoverage(along, 5, 1.25, foot) *
+            (0.35 + 0.65 * lamps);
+          r += (TUBE[0] - r) * tube;
+          g += (TUBE[1] - g) * tube;
+          b += (TUBE[2] - b) * tube;
+          view.blend(x, y, r, g, b, cov);
+          break;
+        }
+      }
     }
   }
   // Soft glow from the tubes onto the platform at night.

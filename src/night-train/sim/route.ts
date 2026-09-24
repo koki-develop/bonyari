@@ -380,6 +380,9 @@ function buildSection(index: number, kind: SectionKind, start: number, seed: num
  * The endless line. Sections are generated lazily from a seed so any stretch of
  * track is reproducible; queries are pure functions of the along-track position.
  */
+/** Offsets of the sections searched around a position: its own, then the next, then the previous. */
+const NEAR = [0, 1, -1] as const;
+
 export class Route {
   private readonly seed: number;
   private readonly sections: Section[] = [];
@@ -545,7 +548,12 @@ export class Route {
   }
 
   tunnelAt(along: number): Span | null {
-    for (const sec of this.nearSections(along)) {
+    const i = this.indexAt(along);
+    for (let n = 0; n < NEAR.length; n++) {
+      const sec = this.sections[i + NEAR[n]];
+      if (!sec) {
+        continue;
+      }
       for (const t of sec.tunnels) {
         if (along >= t.start && along < t.end) {
           return t;
@@ -556,7 +564,12 @@ export class Route {
   }
 
   bridgeAt(along: number, margin = 0): Bridge | null {
-    for (const sec of this.nearSections(along)) {
+    const i = this.indexAt(along);
+    for (let n = 0; n < NEAR.length; n++) {
+      const sec = this.sections[i + NEAR[n]];
+      if (!sec) {
+        continue;
+      }
       for (const b of sec.bridges) {
         if (along >= b.start - margin && along < b.end + margin) {
           return b;
@@ -567,8 +580,9 @@ export class Route {
   }
 
   stationAt(along: number, margin = 0): Station | null {
-    for (const sec of this.nearSections(along)) {
-      const st = sec.station;
+    const i = this.indexAt(along);
+    for (let n = 0; n < NEAR.length; n++) {
+      const st = this.sections[i + NEAR[n]]?.station;
       if (st && along >= st.start - margin && along < st.end + margin) {
         return st;
       }
@@ -602,12 +616,6 @@ export class Route {
 
   crossingsIn(a: number, b: number): Crossing[] {
     return this.sectionsIn(a, b).flatMap((s) => s.crossings.filter((c) => c.at > a && c.at < b));
-  }
-
-  private nearSections(along: number): Section[] {
-    const i = this.indexAt(along);
-    const s = this.sections;
-    return [s[i], s[i + 1], s[i - 1]].filter((x): x is Section => x !== undefined);
   }
 
   /** Height (m) of the rails above the surrounding ground, including bridge embankments. */

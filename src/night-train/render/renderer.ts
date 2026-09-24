@@ -3,11 +3,12 @@ import { bump, clamp01, smoothstep } from "../core/math.ts";
 import { Surface } from "../core/surface.ts";
 import { formatClock } from "../sim/clock.ts";
 import { crossingActive } from "../sim/crossing.ts";
-import { type Crossing, makeTerrainScratch, type Station } from "../sim/route.ts";
+import { type Crossing, makeTerrainScratch, type Span, type Station } from "../sim/route.ts";
 import type { Shell } from "../sim/spectacle.ts";
 import { type Car, LANE_OFFSET, ONCOMING_CAR_LENGTH, type OncomingTrain } from "../sim/traffic.ts";
 import type { World } from "../sim/world.ts";
 import { Camera, EYE_ABOVE_RAIL } from "./camera.ts";
+import { Cover } from "./cover.ts";
 import { drawShell } from "./fireworks.ts";
 import { Glass } from "./glass.ts";
 import { GroundRenderer } from "./ground.ts";
@@ -17,6 +18,7 @@ import { computeLighting, type Lighting } from "./lighting.ts";
 import { crossingLampPhase, drawCrossing, drawWaitingCar } from "./near/crossing.ts";
 import {
   CANOPY_HEIGHT,
+  coverPlatform,
   drawPillars,
   drawPlatform,
   drawPlatformBack,
@@ -27,6 +29,8 @@ import {
 } from "./near/station.ts";
 import {
   BARRIER_LATERAL,
+  coverBarrier,
+  coverTunnel,
   TUNNEL_LAMP_HEIGHT,
   TUNNEL_LAMP_SPACING,
   drawBarrier,
@@ -40,9 +44,10 @@ import {
   TRUSS_LATERAL_DOUBLE,
   TRUSS_LATERAL_SINGLE,
   TUNNEL_LATERAL,
+  tunnelEncloses,
 } from "./near/trackside.ts";
 import { drawTunnelHills } from "./near/tunnel-hill.ts";
-import { drawCar, drawOncoming, ONCOMING_LATERAL } from "./near/vehicles.ts";
+import { coverOncoming, drawCar, drawOncoming, ONCOMING_LATERAL } from "./near/vehicles.ts";
 import { Painter } from "./painter.ts";
 import { Precipitation } from "./precipitation.ts";
 import { RIDGE_LATERALS, RidgeRenderer } from "./ridges.ts";
@@ -116,6 +121,7 @@ export class Renderer {
   private readonly shade = new Shade();
   private readonly stationShade = new Shade();
   private readonly painter = new Painter();
+  private readonly cover = new Cover();
   private readonly sky: SkyRenderer;
   private readonly ridges = new RidgeRenderer();
   private readonly ground = new GroundRenderer();
@@ -210,15 +216,35 @@ export class Renderer {
     this.sky.update(dt, world);
 
     const view = this.view;
-    this.sky.render(view, cam, world, light, time);
-    this.ridges.prepare(view, cam, world);
-    this.ground.render(view, cam, world, light, this.table, this.ridges.groundLimit, time);
-    this.painter.begin(view, cam, this.shade, light, world, time);
-    this.collectDrawables(world);
+    // Deep in a tunnel the lining covers the whole view: skip all that lies beyond it.
+    const [t0, t1] = cam.alongRange(TUNNEL_LATERAL, 2);
+    const enclosed = tunnelEncloses(cam, world.route.tunnelsIn(t0, t1));
+    this.painter.begin(view, cam, this.shade, light, world, time, this.cover);
+    this.collectDrawables(world, enclosed ? TUNNEL_LATERAL : Infinity);
+    if (enclosed) {
+      this.cover.reset(view.width, view.height);
+    } else {
+      // Near opaque layers mark what they will paint over, so the layers
+      // behind them leave those pixels alone.
+      this.markCover(world);
+      this.ridges.prepare(view, cam, world, this.cover);
+      this.ground.plan(view, cam, this.ridges.groundLimit, this.cover);
+      this.sky.render(view, cam, world, light, time, this.cover, this.ground.hiddenColumns);
+      this.ground.render(
+        view,
+        cam,
+        world,
+        light,
+        this.table,
+        this.ridges.groundLimit,
+        time,
+        this.cover,
+      );
+    }
     for (const d of this.drawables) {
       this.draw(d, world, light, options, time);
     }
-    const shelter = this.tunnelCover(world);
+    const shelter = this.tunnelShelter(world);
     this.precipitation.render(view, cam, world, light, dt, time, shelter);
 
     this.outside = averageColor(view);
@@ -421,7 +447,7 @@ export class Renderer {
   }
 
   /** How much of the view is inside a tunnel (sheltered from rain and snow). */
-  private tunnelCover(world: World): number {
+  private tunnelShelter(world: World): number {
     const t = world.route.tunnelAt(world.train.pos);
     return t ? clamp01(Math.min(world.train.pos - t.start, t.end - world.train.pos) / 20) : 0;
   }
@@ -439,7 +465,54 @@ export class Renderer {
     };
   }
 
-  private collectDrawables(world: World): void {
+  /** Lets the near opaque layers in the draw list mark the pixels they will cover. */
+  private markCover(world: World): void {
+    const cover = this.cover;
+    cover.reset(this.view.width, this.view.height);
+    const cam = this.cam;
+    for (const d of this.drawables) {
+      switch (d.kind) {
+        case "tunnels":
+          coverTunnel(cam, this.tunnelsNear(world), cover);
+          break;
+        case "barrier":
+          coverBarrier(cam, this.barrierHeight, this.barrierGaps(world), cover);
+          break;
+        case "platform":
+          coverPlatform(cam, d.station, cover);
+          break;
+        case "oncoming":
+          coverOncoming(cam, d.train, this.oncomingTravel(world, d.train), cover);
+          break;
+      }
+    }
+  }
+
+  /** Tunnels whose lining can show this frame. */
+  private tunnelsNear(world: World): Span[] {
+    const [a, b] = this.cam.alongRange(TUNNEL_LATERAL, 40);
+    return world.route.tunnelsIn(a - 20, b + 20);
+  }
+
+  /** Platforms interrupting the noise barrier this frame. */
+  private barrierGaps(world: World): Station[] {
+    const [a, b] = this.cam.alongRange(BARRIER_LATERAL, 20);
+    return world.route.stationsIn(a, b);
+  }
+
+  private readonly barrierHeight = (along: number): number =>
+    this.table.sample(this.table.barrier, along);
+
+  /** Distance (m) a passing train moves against us during the frame: its motion blur. */
+  private oncomingTravel(world: World, train: OncomingTrain): number {
+    return (train.speed + world.train.speed) * this.frameDt;
+  }
+
+  /**
+   * Gathers everything to draw between the ground and the glass, farthest
+   * first. Nothing beyond `reach` (m) can be seen this frame and is left out.
+   */
+  private collectDrawables(world: World, reach: number): void {
     const out = this.drawables;
     out.length = 0;
     const cam = this.cam;
@@ -447,7 +520,11 @@ export class Renderer {
     const train = world.train;
     const table = this.table;
 
-    placeScenery(this.scenery, cam, world, table);
+    if (reach === Infinity) {
+      placeScenery(this.scenery, cam, world, table);
+    } else {
+      this.scenery.length = 0;
+    }
     for (const item of this.scenery) {
       out.push({ lateral: item.lateral, kind: "scenery", item });
     }
@@ -518,6 +595,15 @@ export class Renderer {
     for (const tr of world.traffic.trains) {
       out.push({ lateral: ONCOMING_LATERAL, kind: "oncoming", train: tr });
     }
+    if (reach !== Infinity) {
+      let kept = 0;
+      for (const d of out) {
+        if (d.lateral <= reach) {
+          out[kept++] = d;
+        }
+      }
+      out.length = kept;
+    }
     out.sort((a, b) => b.lateral - a.lateral);
   }
 
@@ -553,18 +639,11 @@ export class Renderer {
         });
         return;
       }
-      case "barrier": {
-        const [a, b] = cam.alongRange(BARRIER_LATERAL, 20);
-        drawBarrier(
-          this.painter,
-          (along) => this.table.sample(this.table.barrier, along),
-          world.route.stationsIn(a, b),
-          options.lampOn,
-        );
+      case "barrier":
+        drawBarrier(this.painter, this.barrierHeight, this.barrierGaps(world), options.lampOn);
         return;
-      }
       case "ridge":
-        this.ridges.draw(d.index, this.painter);
+        this.ridges.draw(d.index, this.painter, this.cover);
         return;
       case "hills":
         drawTunnelHills(
@@ -572,11 +651,9 @@ export class Renderer {
           world.route.tunnelsIn(world.train.pos - HILL_RANGE, world.train.pos + HILL_RANGE),
         );
         return;
-      case "tunnels": {
-        const [a, b] = cam.alongRange(TUNNEL_LATERAL, 40);
-        drawTunnel(this.painter, world.route.tunnelsIn(a - 20, b + 20), options.lampOn);
+      case "tunnels":
+        drawTunnel(this.painter, this.tunnelsNear(world), options.lampOn);
         return;
-      }
       case "bridge": {
         const [a, b] = cam.alongRange(8, 20);
         const bridge = world.route.bridgesIn(a - 10, b + 10)[d.index];
@@ -611,12 +688,7 @@ export class Renderer {
         drawWaitingCar(p, d.crossing, d.lateral, world.train.pos);
         return;
       case "oncoming": {
-        drawOncoming(
-          this.painter,
-          d.train,
-          (d.train.speed + world.train.speed) * this.frameDt,
-          options.lampOn,
-        );
+        drawOncoming(this.painter, d.train, this.oncomingTravel(world, d.train), options.lampOn);
         return;
       }
     }

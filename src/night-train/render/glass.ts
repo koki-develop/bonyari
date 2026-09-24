@@ -312,33 +312,52 @@ export class Glass {
     }
     const fog = this.fog;
     const out = screen.data;
+    const src = view.data;
     const [tr, tg, tb] = fogTint;
+    // The glass lies wholly on screen; each row is the view shifted by the
+    // car's sway, copied as is where the glass is clear.
+    const x0 = Math.max(0, -rect.x);
+    const x1 = Math.min(w, screen.width - rect.x);
     for (let y = 0; y < h; y++) {
       const sy = rect.y + y;
       if (sy < 0 || sy >= screen.height) {
         continue;
       }
       const vy = Math.max(0, Math.min(h - 1, y - jolt));
-      for (let x = 0; x < w; x++) {
-        const sx = rect.x + x;
-        if (sx < 0 || sx >= screen.width) {
+      const srcRow = vy * w;
+      const dstRow = sy * screen.width + rect.x;
+      // Columns [a, b) read the view at x - sway without clamping.
+      const a = Math.max(x0, sway);
+      const b = Math.min(x1, w + sway);
+      if (b > a) {
+        out.set(src.subarray(srcRow + a - sway, srcRow + b - sway), dstRow + a);
+      }
+      for (let x = x0; x < a; x++) {
+        out[dstRow + x] = src[srcRow];
+      }
+      for (let x = Math.max(b, x0); x < x1; x++) {
+        out[dstRow + x] = src[srcRow + w - 1];
+      }
+      if (!hasFog) {
+        continue;
+      }
+      const row = y * w;
+      for (let x = x0; x < x1; x++) {
+        const f = fog[row + x];
+        if (f <= 0.01) {
           continue;
         }
-        const i = y * w + x;
-        const vx = x - sway < 0 ? 0 : x - sway >= w ? w - 1 : x - sway;
-        const c = view.data[vy * w + vx];
-        let r = c & 255;
-        let g = (c >>> 8) & 255;
-        let b = (c >>> 16) & 255;
-        const f = hasFog ? fog[i] : 0;
-        if (f > 0.01) {
-          const bc = this.blur[i];
-          const k = Math.min(0.94, f);
-          r += ((bc & 255) * 0.75 + tr - r) * k;
-          g += (((bc >>> 8) & 255) * 0.75 + tg - g) * k;
-          b += (((bc >>> 16) & 255) * 0.75 + tb - b) * k;
-        }
-        out[sy * screen.width + sx] = pack(r, g, b);
+        const c = out[dstRow + x];
+        const bc = this.blur[row + x];
+        const k = Math.min(0.94, f);
+        const r = c & 255;
+        const g = (c >>> 8) & 255;
+        const bl = (c >>> 16) & 255;
+        out[dstRow + x] = pack(
+          r + ((bc & 255) * 0.75 + tr - r) * k,
+          g + (((bc >>> 8) & 255) * 0.75 + tg - g) * k,
+          bl + (((bc >>> 16) & 255) * 0.75 + tb - bl) * k,
+        );
       }
     }
     this.drawDrops(screen, view, rect, jolt);

@@ -133,6 +133,14 @@ export class Interior {
   private wasJolted = false;
   /** Light thrown into the car by nearby sources this frame (RGB, 0..1 per unit albedo). */
   private readonly thrown: Float32Array;
+  /** Runs [start, end) of pixels that receive thrown light; row y's runs are rowRuns[y]..rowRuns[y + 1]. */
+  private runStart = new Int32Array(0);
+  private runEnd = new Int32Array(0);
+  private rowRuns = new Int32Array(0);
+  /** Runs [start, end) of pixels showing the car; row y's runs are surfaceRows[y]..surfaceRows[y + 1]. */
+  private surfaceStart = new Int32Array(0);
+  private surfaceEnd = new Int32Array(0);
+  private surfaceRows = new Int32Array(0);
   private itemsFor = -1;
 
   constructor(layout: Layout) {
@@ -145,6 +153,62 @@ export class Interior {
     this.thrown = new Float32Array(width * height * 3);
     this.paint();
     this.computeLight();
+    this.findReceivers();
+    this.findSurfaces();
+  }
+
+  /** Runs of pixels, row by row, that show the car rather than the glass. */
+  private findSurfaces(): void {
+    const { width, height } = this.layout;
+    const starts: number[] = [];
+    const ends: number[] = [];
+    this.surfaceRows = new Int32Array(height + 1);
+    for (let y = 0; y < height; y++) {
+      this.surfaceRows[y] = starts.length;
+      let open = -1;
+      for (let x = 0; x <= width; x++) {
+        const solid = x < width && this.mask[y * width + x] !== 0;
+        if (solid && open < 0) {
+          open = x;
+        } else if (!solid && open >= 0) {
+          starts.push(open);
+          ends.push(x);
+          open = -1;
+        }
+      }
+    }
+    this.surfaceRows[height] = starts.length;
+    this.surfaceStart = Int32Array.from(starts);
+    this.surfaceEnd = Int32Array.from(ends);
+  }
+
+  /**
+   * Runs of pixels, row by row, that light thrown in through the window can
+   * reach: the car's surfaces (not the glass) close enough to the window.
+   */
+  private findReceivers(): void {
+    const { width, height } = this.layout;
+    const starts: number[] = [];
+    const ends: number[] = [];
+    this.rowRuns = new Int32Array(height + 1);
+    for (let y = 0; y < height; y++) {
+      this.rowRuns[y] = starts.length;
+      let open = -1;
+      for (let x = 0; x <= width; x++) {
+        const i = y * width + x;
+        const receives = x < width && this.windowLight[i] >= 0.02 && this.mask[i] !== 0;
+        if (receives && open < 0) {
+          open = x;
+        } else if (!receives && open >= 0) {
+          starts.push(open);
+          ends.push(x);
+          open = -1;
+        }
+      }
+    }
+    this.rowRuns[height] = starts.length;
+    this.runStart = Int32Array.from(starts);
+    this.runEnd = Int32Array.from(ends);
   }
 
   /** Whether a screen pixel shows the glass (and the view). */
@@ -407,18 +471,21 @@ export class Interior {
     const dr = or / 255;
     const dg = og / 255;
     const db = ob / 255;
-    for (let i = 0; i < width * height; i++) {
-      if (this.mask[i] === 0) {
-        continue;
+    const { surfaceStart, surfaceEnd, surfaceRows, windowLight, lampLight } = this;
+    for (let y = 0; y < height; y++) {
+      for (let run = surfaceRows[y]; run < surfaceRows[y + 1]; run++) {
+        const end = y * width + surfaceEnd[run];
+        for (let i = y * width + surfaceStart[run]; i < end; i++) {
+          const wl = windowLight[i] * 1.25;
+          const c = alb[i];
+          const ll = lampLight[i];
+          const t = i * 3;
+          const r = (c & 255) * (lr * ll + dr * wl + thrown[t] + nr + 0.06 * dr);
+          const g = ((c >>> 8) & 255) * (lg * ll + dg * wl + thrown[t + 1] + ng + 0.06 * dg);
+          const b = ((c >>> 16) & 255) * (lb * ll + db * wl + thrown[t + 2] + nb + 0.06 * db);
+          out[i] = pack(r, g, b);
+        }
       }
-      const wl = this.windowLight[i] * 1.25;
-      const c = alb[i];
-      const ll = this.lampLight[i];
-      const t = i * 3;
-      const r = (c & 255) * (lr * ll + dr * wl + thrown[t] + nr + 0.06 * dr);
-      const g = ((c >>> 8) & 255) * (lg * ll + dg * wl + thrown[t + 1] + ng + 0.06 * dg);
-      const b = ((c >>> 16) & 255) * (lb * ll + db * wl + thrown[t + 2] + nb + 0.06 * db);
-      out[i] = pack(r, g, b);
     }
     if (f.sun) {
       this.renderSunPatch(screen, f.sun);
@@ -450,22 +517,37 @@ export class Interior {
       const x1 = Math.min(width, Math.ceil(l.x + sx * 3));
       const y0 = Math.max(0, Math.floor(cy - sy * 3));
       const y1 = Math.min(height, Math.ceil(cy + sy * 3));
+      // The Gaussian is stepped along each run of receiving pixels by its
+      // ratio recurrence instead of calling exp for every pixel.
+      const step = 1 / sx;
+      const decay = Math.exp(-step * step);
+      const { runStart, runEnd, rowRuns } = this;
       for (let y = y0; y < y1; y++) {
         const dy = (y - cy) / sy;
+        const rowK = Math.exp(-0.5 * dy * dy);
         // The pool leans away from the light as it spreads from the window.
         const lean = (y - midY) * 0.35 * Math.sign(l.x - (win.x + win.w / 2));
-        for (let x = x0; x < x1; x++) {
-          const i = y * width + x;
-          const reach = this.windowLight[i];
-          if (reach < 0.02 || this.mask[i] === 0) {
+        const row = y * width;
+        for (let r = rowRuns[y]; r < rowRuns[y + 1]; r++) {
+          const a = Math.max(runStart[r], x0);
+          const b = Math.min(runEnd[r], x1);
+          if (a >= b) {
             continue;
           }
-          const dx = (x - l.x + lean) / sx;
-          const k = Math.exp(-0.5 * (dx * dx + dy * dy)) * reach;
-          const t = i * 3;
-          thrown[t] += l.r * k;
-          thrown[t + 1] += l.g * k;
-          thrown[t + 2] += l.b * k;
+          const dx0 = (a - l.x + lean) / sx;
+          // g = exp(-dx²/2) at x; ratio = g(x + 1) / g(x).
+          let g = Math.exp(-0.5 * dx0 * dx0);
+          let ratio = Math.exp(-dx0 * step - 0.5 * step * step);
+          for (let x = a; x < b; x++) {
+            const i = row + x;
+            const k = g * rowK * this.windowLight[i];
+            const t = i * 3;
+            thrown[t] += l.r * k;
+            thrown[t + 1] += l.g * k;
+            thrown[t + 2] += l.b * k;
+            g *= ratio;
+            ratio *= decay;
+          }
         }
       }
     }

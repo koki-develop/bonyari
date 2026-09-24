@@ -5,6 +5,7 @@ import type { Surface } from "../../core/surface.ts";
 import type { Bridge, Span } from "../../sim/route.ts";
 import { type Camera, EYE_ABOVE_RAIL } from "../camera.ts";
 import { HALF_GAUGE, NEXT_TRACK } from "../ground.ts";
+import type { Cover } from "../cover.ts";
 import type { Painter } from "../painter.ts";
 import { PORTAL_TOP, PORTAL_WALL_END, portalWallTop } from "./tunnel-hill.ts";
 import type { Shade } from "../shade.ts";
@@ -75,6 +76,9 @@ function column(
  * and fall as the poles flick past.
  * @param present whether pole number `i` stands (not in tunnels, stations, bridges)
  */
+/** Scratch: whether each pole in view stands. */
+let STANDING = new Uint8Array(8);
+
 export function drawPolesAndWires(
   view: Surface,
   cam: Camera,
@@ -92,10 +96,22 @@ export function drawPolesAndWires(
   const wb = shade.litB(WIRE[2]);
   const top = cam.yRail(lateral, 9.2);
   const arm = cam.yRail(lateral, 8.4);
+  // Only a few poles fall in view: ask once for each.
+  const first = Math.floor((cam.alongAt(0, lateral) - POLE_OFFSET) / POLE_SPACING) - 1;
+  const last = Math.floor((cam.alongAt(view.width - 1, lateral) - POLE_OFFSET) / POLE_SPACING) + 2;
+  const count = last - first + 1;
+  if (STANDING.length < count) {
+    STANDING = new Uint8Array(count * 2);
+  }
+  for (let n = 0; n < count; n++) {
+    STANDING[n] = present(first + n) ? 1 : 0;
+  }
+  const stands = (n: number): boolean =>
+    n >= first && n <= last ? STANDING[n - first] === 1 : present(n);
   for (let x = 0; x < view.width; x++) {
     const along = cam.alongAt(x, lateral) - POLE_OFFSET;
     const i = Math.floor(along / POLE_SPACING + 0.5);
-    const standing = present(i);
+    const standing = stands(i);
     if (standing) {
       const cov = pulseCoverage(along + 0.18, POLE_SPACING, 0.36, footprint);
       column(view, x, top, view.height, pr, pg, pb, cov);
@@ -104,13 +120,125 @@ export function drawPolesAndWires(
     }
     // Wires hang between neighbouring poles that both stand.
     const k = Math.floor(along / POLE_SPACING);
-    if (present(k) && present(k + 1)) {
+    if (stands(k) && stands(k + 1)) {
       const t = mod(along, POLE_SPACING) / POLE_SPACING;
       const sag = 4 * t * (1 - t);
       for (const h of [8.25, 7.7]) {
         const y = cam.yRail(lateral, h - 0.55 * sag);
         view.blend(x, Math.floor(y), wr, wg, wb, 0.92);
       }
+    }
+  }
+}
+
+/** One column of the noise barrier: what the drawing and the occlusion both need. */
+interface BarrierColumn {
+  along: number;
+  /** Height (m above the rails) of the panels. */
+  h: number;
+  /** Coverage left after the gaps at platforms. */
+  cov: number;
+  /** Screen y of the post tops and of the barrier's foot (clamped to the view). */
+  top: number;
+  foot: number;
+  /** Coverage of a post. */
+  post: number;
+  /** Whether this stretch has clear panels. */
+  clear: boolean;
+}
+
+const BARRIER_COLUMN: BarrierColumn = {
+  along: 0,
+  h: 0,
+  cov: 0,
+  top: 0,
+  foot: 0,
+  post: 0,
+  clear: false,
+};
+
+/** Fills `out` for column `x`; false where no barrier stands. */
+function barrierColumn(
+  cam: Camera,
+  x: number,
+  viewHeight: number,
+  height: (along: number) => number,
+  gaps: readonly Span[],
+  out: BarrierColumn,
+): boolean {
+  const lateral = BARRIER_LATERAL;
+  const footprint = cam.footprint(lateral);
+  const along = cam.alongAt(x, lateral);
+  const h = height(along);
+  if (h < 0.2) {
+    return false;
+  }
+  let cov = 1;
+  for (const gap of gaps) {
+    cov -= intervalCoverage(along, gap.start, gap.end, footprint);
+  }
+  if (cov <= 0.01) {
+    return false;
+  }
+  out.along = along;
+  out.h = h;
+  out.cov = cov;
+  out.top = cam.yRail(lateral, h + 0.08);
+  out.foot = Math.min(viewHeight, Math.ceil(cam.yRail(lateral, 0)));
+  out.post = pulseCoverage(along + 0.08, BARRIER_POST_SPACING, 0.16, footprint);
+  // Clear panels along some stretches, always from post to post.
+  out.clear = hash2(Math.floor(along / BARRIER_CLEAR_RUN), 71) < 0.3;
+  return true;
+}
+
+/**
+ * Opacity of the barrier at `hy` (m above the rails) in a column, or -1 where
+ * nothing is drawn (above the panels, between the posts).
+ */
+function barrierAlpha(c: BarrierColumn, hy: number): number {
+  const postTop = hy > c.h;
+  if (postTop && c.post <= 0.01) {
+    return -1;
+  }
+  let alpha = c.cov;
+  if (hy >= BARRIER_PARAPET && c.clear) {
+    // Glazing: a solid frame at the top and bottom, a faint sheen between.
+    const sheen = mod(c.along * 0.7 + hy * 1.6, 3.2) < 0.35 ? 1 : 0;
+    alpha *= hy > c.h - 0.06 || hy < BARRIER_PARAPET + 0.05 ? 1 : 0.18 + sheen * 0.14;
+  }
+  if (c.post > 0.01) {
+    alpha = postTop ? c.post * c.cov : Math.max(alpha, c.post * c.cov);
+  }
+  return alpha;
+}
+
+/** Marks the pixels the barrier and the deck at its foot paint over opaquely. */
+export function coverBarrier(
+  cam: Camera,
+  height: (along: number) => number,
+  gaps: readonly Span[],
+  cover: Cover,
+): void {
+  const col = BARRIER_COLUMN;
+  for (let x = 0; x < cover.width; x++) {
+    if (!barrierColumn(cam, x, cover.height, height, gaps, col)) {
+      continue;
+    }
+    let runStart = -1;
+    for (let y = Math.max(0, Math.floor(col.top)); y < col.foot; y++) {
+      const opaque = barrierAlpha(col, cam.railHeightAt(y, BARRIER_LATERAL)) >= 1;
+      if (opaque && runStart < 0) {
+        runStart = y;
+      } else if (!opaque && runStart >= 0) {
+        cover.markRun(x, runStart, y, BARRIER_LATERAL);
+        runStart = -1;
+      }
+    }
+    if (runStart >= 0) {
+      cover.markRun(x, runStart, col.foot, BARRIER_LATERAL);
+    }
+    if (col.cov >= 1) {
+      cover.markRun(x, Math.max(0, col.foot), cover.height, BARRIER_LATERAL);
     }
   }
 }
@@ -133,47 +261,34 @@ export function drawBarrier(
   const lateral = BARRIER_LATERAL;
   p.at(lateral);
   const shade = p.shade;
-  const footprint = cam.footprint(lateral);
   const face = p.surfaceLight(0, 0, 1);
   const sideA = p.surfaceLight(-1, 0, 0.3);
   const sideB = p.surfaceLight(1, 0, 0.3);
   // Our car's windows throw soft patches of light out onto the barrier.
   const night = spill * (1 - p.light.daylight);
+  const col = BARRIER_COLUMN;
   for (let x = 0; x < view.width; x++) {
-    const along = cam.alongAt(x, lateral);
-    const h = height(along);
-    if (h < 0.2) {
+    if (!barrierColumn(cam, x, view.height, height, gaps, col)) {
       continue;
     }
-    let cov = 1;
-    for (const gap of gaps) {
-      cov -= intervalCoverage(along, gap.start, gap.end, footprint);
-    }
-    if (cov <= 0.01) {
-      continue;
-    }
-    const top = cam.yRail(lateral, h + 0.08);
-    const post = pulseCoverage(along + 0.08, BARRIER_POST_SPACING, 0.16, footprint);
+    const { along, h, cov, post, clear, foot } = col;
     // The flange facing the sun is lit, the other in shade.
     const postK = mod(along + 0.08, BARRIER_POST_SPACING) < 0.08 ? sideA : sideB;
-    // Clear panels along some stretches, always from post to post.
-    const clear = hash2(Math.floor(along / BARRIER_CLEAR_RUN), 71) < 0.3;
     // Rain streaks from the panel joints and the parapet top.
     const streakCell = Math.floor(along / 0.12);
     const streak = hash2(streakCell, 29);
     const streakLen = 0.15 + 0.5 * hash2(streakCell, 31);
     const glowX = (along - cam.pos) / WINDOW_PITCH;
     const windowGlow = night > 0 ? night * (0.5 + 0.5 * Math.cos(glowX * Math.PI * 2)) ** 2 : 0;
-    const foot = Math.min(view.height, Math.ceil(cam.yRail(lateral, 0)));
-    for (let y = Math.max(0, Math.floor(top)); y < foot; y++) {
+    for (let y = Math.max(0, Math.floor(col.top)); y < foot; y++) {
       const hy = cam.railHeightAt(y, lateral);
-      const postTop = hy > h;
-      if (postTop && post <= 0.01) {
+      const alpha = barrierAlpha(col, hy);
+      if (alpha < 0) {
         continue;
       }
+      const postTop = hy > h;
       let c: RGB;
       let k = face;
-      let alpha = cov;
       if (hy < BARRIER_PARAPET) {
         // Cast concrete parapet with a drip groove under its coping.
         c = CONCRETE;
@@ -191,10 +306,8 @@ export function drawBarrier(
           k *= 0.82 + hy * 1.5;
         }
       } else if (clear) {
-        // Tinted glazing over what lies beyond, with a slanting sheen and a frame on top.
+        // Tinted glazing over what lies beyond.
         c = CLEAR_PANEL;
-        const sheen = mod(along * 0.7 + hy * 1.6, 3.2) < 0.35 ? 1 : 0;
-        alpha *= hy > h - 0.06 || hy < BARRIER_PARAPET + 0.05 ? 1 : 0.18 + sheen * 0.14;
         k *= 1.1;
       } else {
         // Louvered absorbing panels: a shadowed slot under each rib, a capping rail on top.
@@ -216,7 +329,6 @@ export function drawBarrier(
         r += (STEEL[0] * postK - r) * a;
         g += (STEEL[1] * postK - g) * a;
         b += (STEEL[2] * postK - b) * a;
-        alpha = postTop ? post * cov : Math.max(alpha, post * cov);
       }
       if (windowGlow > 0.01) {
         const v = windowGlow * Math.exp(-((hy - 1.0) ** 2) / 0.5) * 2.5;
@@ -374,6 +486,42 @@ export function drawRailing(
     column(view, x, railY, railY + 1, r, g, b, inside);
     column(view, x, railY, deckY, r, g, b, inside * pulseCoverage(along, 2, 0.1, footprint));
     column(view, x, deckY, view.height, r * 0.6, g * 0.6, b * 0.6, inside);
+  }
+}
+
+/**
+ * Whether the tunnel lining fills the whole view this frame: every column
+ * lies fully inside one tunnel, so the lining overwrites every pixel and
+ * nothing farther away can show.
+ */
+export function tunnelEncloses(cam: Camera, tunnels: readonly Span[]): boolean {
+  const footprint = cam.footprint(TUNNEL_LATERAL);
+  const first = cam.alongAt(0, TUNNEL_LATERAL);
+  const last = cam.alongAt(cam.width - 1, TUNNEL_LATERAL);
+  for (const t of tunnels) {
+    if (
+      intervalCoverage(first, t.start, t.end, footprint) === 1 &&
+      intervalCoverage(last, t.start, t.end, footprint) === 1
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Marks the columns the tunnel lining fills from top to bottom. */
+export function coverTunnel(cam: Camera, tunnels: readonly Span[], cover: Cover): void {
+  const lateral = TUNNEL_LATERAL;
+  const footprint = cam.footprint(lateral);
+  for (let x = 0; x < cover.width; x++) {
+    const along = cam.alongAt(x, lateral);
+    let inside = 0;
+    for (const t of tunnels) {
+      inside = Math.max(inside, intervalCoverage(along, t.start, t.end, footprint));
+    }
+    if (inside >= 1) {
+      cover.markRun(x, 0, cover.height, lateral);
+    }
   }
 }
 

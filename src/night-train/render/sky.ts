@@ -7,15 +7,19 @@ import { makeTerrainScratch } from "../sim/route.ts";
 import type { LightningStrike } from "../sim/weather.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
+import type { Cover } from "./cover.ts";
 import type { Lighting } from "./lighting.ts";
 
 const CLOUD_TEX = 128;
+const TEX_MASK = CLOUD_TEX - 1;
 /** Meters covered by one repetition of the cloud texture. */
 const CLOUD_TILE = 7000;
 /** Cloud base height (m). */
 const CLOUD_HEIGHT = 1800;
 /** Color quantization step of the sky gradient; dithered for the pixel-art look. */
 const SKY_STEP = 7;
+/** Scratch direction for per-pixel loops. */
+const DIR: HorizonVector = { e: 0, n: 0, u: 0 };
 
 function quantize(v: number, d: number): number {
   return Math.floor(v / SKY_STEP + d) * SKY_STEP;
@@ -52,6 +56,44 @@ function buildCloudTexture(seed: number): Float32Array {
   return tex;
 }
 
+/**
+ * Unit view directions of the sky pixels, and the length of their horizontal
+ * part. They depend only on the camera, so they are kept until it changes
+ * (the heading turns only between sections).
+ */
+class SkyDirections {
+  e = new Float64Array(0);
+  n = new Float64Array(0);
+  u = new Float64Array(0);
+  horizontal = new Float64Array(0);
+  private key = "";
+
+  update(cam: Camera, width: number, rows: number): void {
+    const key = `${width} ${rows} ${cam.cx} ${cam.focal} ${cam.horizon} ${cam.heading}`;
+    if (key === this.key) {
+      return;
+    }
+    this.key = key;
+    const size = width * rows;
+    if (this.e.length !== size) {
+      this.e = new Float64Array(size);
+      this.n = new Float64Array(size);
+      this.u = new Float64Array(size);
+      this.horizontal = new Float64Array(size);
+    }
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < width; x++) {
+        const d = cam.direction(x, y, DIR);
+        const i = y * width + x;
+        this.e[i] = d.e;
+        this.n[i] = d.n;
+        this.u[i] = d.u;
+        this.horizontal[i] = Math.hypot(d.e, d.n) || 1;
+      }
+    }
+  }
+}
+
 /** A rounded lobe of a towering cloud, in screen pixels. */
 interface Lobe {
   x: number;
@@ -66,6 +108,15 @@ interface Lobe {
 export class SkyRenderer {
   /** Scratch list for the lobes of the cloud being drawn. */
   private readonly lobes: Lobe[] = [];
+  private readonly dirs = new SkyDirections();
+  /** The four dithered colors of the gradient row being drawn. */
+  private readonly plainRow = new Uint32Array(4);
+  /** Scratch for the lobes crossing the row being drawn. */
+  private activeLobes = new Int32Array(64);
+  private lobeDy = new Float64Array(64);
+  /** This frame's cover and the columns where covered sky may be skipped. */
+  private cover!: Cover;
+  private hidden!: Uint8Array;
   private readonly starX: Float32Array;
   private readonly starY: Float32Array;
   private readonly starZ: Float32Array;
@@ -120,7 +171,22 @@ export class SkyRenderer {
     this.strikeAge += dt;
   }
 
-  render(view: Surface, cam: Camera, world: World, light: Lighting, time: number): void {
+  /**
+   * @param cover pixels near layers will paint over
+   * @param hidden columns where covered sky may be skipped (no reflection reads it)
+   */
+  render(
+    view: Surface,
+    cam: Camera,
+    world: World,
+    light: Lighting,
+    time: number,
+    cover: Cover,
+    hidden: Uint8Array,
+  ): void {
+    this.dirs.update(cam, view.width, Math.min(view.height, Math.ceil(cam.horizon) + 2));
+    this.cover = cover;
+    this.hidden = hidden;
     this.gradient(view, cam, world, light);
     this.stars(view, cam, world, light, time);
     this.airplanes(view, cam, world, light, time);
@@ -140,6 +206,9 @@ export class SkyRenderer {
     const sunHoriz = Math.hypot(sun.e, sun.n) || 1;
     const rows = Math.min(view.height, Math.ceil(cam.horizon) + 2);
     const data = view.data;
+    const { e: dirE, n: dirN, u: dirU, horizontal: dirH } = this.dirs;
+    const covered = this.cover.order;
+    const hidden = this.hidden;
     for (let y = 0; y < rows; y++) {
       const el = Math.atan2(cam.horizon - y - 0.5, cam.focal);
       const g = Math.pow(clamp01(el / (Math.PI / 2)), 0.42);
@@ -147,11 +216,27 @@ export class SkyRenderer {
       const bg = lerp(horizon[1], zenith[1], g);
       const bb = lerp(horizon[2], zenith[2], g);
       const nearHorizon = 1 - g;
+      const row = y * view.width;
+      // Where the sun adds nothing, a pixel's color depends only on the row
+      // and its place in the dither pattern.
+      const plain = this.plainRow;
+      for (let q = 0; q < 4; q++) {
+        const dz = bayer(q, y);
+        plain[q] = pack(quantize(br, dz), quantize(bg, dz), quantize(bb, dz));
+      }
       for (let x = 0; x < view.width; x++) {
-        const d = cam.direction(x, y);
-        const c = d.e * sun.e + d.n * sun.n + d.u * sun.u;
-        const dh = Math.hypot(d.e, d.n) || 1;
-        const cAz = (d.e * sun.e + d.n * sun.n) / (dh * sunHoriz);
+        const i = row + x;
+        if (hidden[x] === 1 && covered[i] !== Infinity) {
+          continue;
+        }
+        if (sunUp === 0) {
+          data[i] = plain[x & 3];
+          continue;
+        }
+        const de = dirE[i];
+        const dn = dirN[i];
+        const c = de * sun.e + dn * sun.n + dirU[i] * sun.u;
+        const cAz = (de * sun.e + dn * sun.n) / (dirH[i] * sunHoriz);
         let k = 0;
         if (c > 0) {
           const c2 = c * c;
@@ -161,8 +246,12 @@ export class SkyRenderer {
         // The twilight band hugs the horizon toward the sun.
         k += Math.max(0, cAz) * Math.max(0, cAz) * nearHorizon * nearHorizon * 0.55 * low;
         k *= sunUp;
+        if (k === 0) {
+          data[i] = plain[x & 3];
+          continue;
+        }
         const dz = bayer(x, y);
-        data[y * view.width + x] = pack(
+        data[i] = pack(
           quantize(br + sunGlow[0] * k, dz),
           quantize(bg + sunGlow[1] * k, dz),
           quantize(bb + sunGlow[2] * k, dz),
@@ -446,7 +535,26 @@ export class SkyRenderer {
     const [hr, hg, hb] = light.horizon;
     const fog = 0.4;
     const yEnd = Math.min(Math.ceil(base), Math.floor(horizon), view.height);
+    const active =
+      this.activeLobes.length >= lobes.length ? this.activeLobes : new Int32Array(lobes.length * 2);
+    this.activeLobes = active;
+    const rowDy =
+      this.lobeDy.length >= lobes.length ? this.lobeDy : new Float64Array(lobes.length * 2);
+    this.lobeDy = rowDy;
     for (let y = Math.max(0, Math.floor(y0)); y < yEnd; y++) {
+      // Only lobes the row passes through can cover its pixels.
+      let count = 0;
+      for (let i = 0; i < lobes.length; i++) {
+        const l = lobes[i];
+        const dy = (y + 0.5 - l.y) / (l.r * l.squash);
+        if (dy * dy < 1) {
+          rowDy[i] = dy;
+          active[count++] = i;
+        }
+      }
+      if (count === 0) {
+        continue;
+      }
       for (let x = Math.max(0, Math.floor(x0)); x <= Math.min(view.width - 1, Math.ceil(x1)); x++) {
         let bestZ = -Infinity;
         let nx = 0;
@@ -454,10 +562,11 @@ export class SkyRenderer {
         let nz = 0;
         let rim = 0;
         let covering = 0;
-        for (let i = 0; i < lobes.length; i++) {
+        for (let j = 0; j < count; j++) {
+          const i = active[j];
           const l = lobes[i];
           const dx = (x + 0.5 - l.x) / l.r;
-          const dy = (y + 0.5 - l.y) / (l.r * l.squash);
+          const dy = rowDy[i];
           const d2 = dx * dx + dy * dy;
           if (d2 >= 1) {
             continue;
@@ -527,6 +636,9 @@ export class SkyRenderer {
     const rows = Math.min(view.height, Math.ceil(cam.horizon));
     const pos = cam.pos;
     const data = view.data;
+    const { e: dirE, n: dirN, u: dirU } = this.dirs;
+    const covered = this.cover.order;
+    const hidden = this.hidden;
     for (let y = 0; y < rows; y++) {
       const dy = cam.horizon - y - 0.5;
       if (dy <= 0.3) {
@@ -540,6 +652,9 @@ export class SkyRenderer {
       const haze = smoothstep(4000, 40000, dist);
       const v = (dist + this.windY) * texScale;
       for (let x = 0; x < view.width; x++) {
+        if (hidden[x] === 1 && covered[y * view.width + x] !== Infinity) {
+          continue;
+        }
         const lateral = ((x + 0.5 - cam.cx) * CLOUD_HEIGHT) / dy;
         const u = (pos + lateral + this.windX) * texScale;
         const d = sampleTex(tex, u, v);
@@ -553,8 +668,8 @@ export class SkyRenderer {
         let g = shadeG + (lit[1] - shadeG) * l;
         let b = shadeB + (lit[2] - shadeB) * l;
         // Thin edges glow when backlit by the sun.
-        const dir = cam.direction(x, y);
-        const c = dir.e * sun.e + dir.n * sun.n + dir.u * sun.u;
+        const di = y * view.width + x;
+        const c = dirE[di] * sun.e + dirN[di] * sun.n + dirU[di] * sun.u;
         if (c > 0.7) {
           const k = Math.pow((c - 0.7) / 0.3, 3) * (1 - a) * 1.6;
           r += glow[0] * k;
@@ -658,17 +773,19 @@ export class SkyRenderer {
 const TERRAIN = makeTerrainScratch();
 
 function sampleTex(tex: Float32Array, u: number, v: number): number {
-  const n = CLOUD_TEX;
-  const fu = u - Math.floor(u);
-  const fv = v - Math.floor(v);
-  const x0 = ((Math.floor(u) % n) + n) % n;
-  const y0 = ((Math.floor(v) % n) + n) % n;
-  const x1 = (x0 + 1) % n;
-  const y1 = (y0 + 1) % n;
-  const a = tex[y0 * n + x0];
-  const b = tex[y0 * n + x1];
-  const c = tex[y1 * n + x0];
-  const d = tex[y1 * n + x1];
+  // The texture side is a power of two, so wrapping is a mask.
+  const iu = Math.floor(u);
+  const iv = Math.floor(v);
+  const fu = u - iu;
+  const fv = v - iv;
+  const x0 = iu & TEX_MASK;
+  const y0 = (iv & TEX_MASK) * CLOUD_TEX;
+  const x1 = (x0 + 1) & TEX_MASK;
+  const y1 = (((iv & TEX_MASK) + 1) & TEX_MASK) * CLOUD_TEX;
+  const a = tex[y0 + x0];
+  const b = tex[y0 + x1];
+  const c = tex[y1 + x0];
+  const d = tex[y1 + x1];
   return lerp(lerp(a, b, fu), lerp(c, d, fu), fv);
 }
 

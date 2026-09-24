@@ -5,6 +5,7 @@ import { bayer, type Surface } from "../core/surface.ts";
 import type { Bridge, Crossing } from "../sim/route.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
+import type { Cover } from "./cover.ts";
 import type { Lighting } from "./lighting.ts";
 import type { TerrainTable } from "./terrain-table.ts";
 
@@ -20,6 +21,8 @@ export const HALF_GAUGE = 0.53;
 
 /** Grassy verge (m) between the embankment and the first fields. */
 const VERGE = 3;
+/** Columns (px) by which a water reflection can reach sideways into the sky. */
+const REFLECTION_REACH = 8;
 /** Size (m) of the armour stones along a seawall. */
 const STONE_ALONG = 1.3;
 const STONE_LATERAL = 1.0;
@@ -160,6 +163,15 @@ function soilTexture(
  */
 export class GroundRenderer {
   private readonly px: Px = { r: 0, g: 0, b: 0 };
+  /**
+   * Columns where no ground pixel is drawn within reach of their reflections,
+   * so the sky there may be skipped wherever a near layer covers it.
+   */
+  hiddenColumns = new Uint8Array(0);
+  /** Columns whose rows right below the horizon are drawn even where covered. */
+  private bandColumns = new Uint8Array(0);
+  private visibleColumns = new Uint8Array(0);
+  private nearest = new Float64Array(0);
   private wildflowers = 0;
   private higanbana = 0;
   /** What `land` found at the last pixel, for the snow over it. */
@@ -171,6 +183,70 @@ export class GroundRenderer {
   private direct = 0;
   private roadOffset = Infinity;
 
+  /**
+   * Works out, before the sky is drawn, which pixels hidden behind near layers
+   * must still be drawn. Water on the ground reflects the sky, and the rows
+   * just below the horizon, from up to `REFLECTION_REACH` columns away; so the
+   * sky may only be skipped far from any visible ground, and the rows right
+   * below the horizon are drawn wherever visible ground is near.
+   */
+  plan(view: Surface, cam: Camera, groundLimit: Float32Array, cover: Cover): void {
+    const W = view.width;
+    if (this.hiddenColumns.length !== W) {
+      this.hiddenColumns = new Uint8Array(W);
+      this.bandColumns = new Uint8Array(W);
+      this.visibleColumns = new Uint8Array(W);
+    }
+    const hidden = this.hiddenColumns;
+    const band = this.bandColumns;
+    if (!cover.any) {
+      hidden.fill(0);
+      band.fill(1);
+      return;
+    }
+    const visible = this.visibleColumns;
+    visible.fill(0);
+    const order = cover.order;
+    const F = cam.focal;
+    const firstRow = Math.max(0, Math.floor(cam.horizon));
+    for (let y = firstRow; y < view.height; y++) {
+      const ry = y + 0.5 - cam.horizon;
+      if (ry <= 0.05) {
+        continue;
+      }
+      const z = (cam.eye * F) / ry;
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        if (z <= groundLimit[x] && order[row + x] === Infinity) {
+          visible[x] = 1;
+        }
+      }
+    }
+    // Distance (columns) to the nearest column with visible ground.
+    let last = -Infinity;
+    if (this.nearest.length !== W) {
+      this.nearest = new Float64Array(W);
+    }
+    const dist = this.nearest;
+    for (let x = 0; x < W; x++) {
+      if (visible[x]) {
+        last = x;
+      }
+      dist[x] = x - last;
+    }
+    last = Infinity;
+    for (let x = W - 1; x >= 0; x--) {
+      if (visible[x]) {
+        last = x;
+      }
+      dist[x] = Math.min(dist[x], last - x);
+    }
+    for (let x = 0; x < W; x++) {
+      band[x] = dist[x] <= 2 * REFLECTION_REACH ? 1 : 0;
+      hidden[x] = dist[x] > 3 * REFLECTION_REACH ? 1 : 0;
+    }
+  }
+
   render(
     view: Surface,
     cam: Camera,
@@ -179,8 +255,13 @@ export class GroundRenderer {
     table: TerrainTable,
     groundLimit: Float32Array,
     time: number,
+    cover: Cover,
   ): void {
     const route = world.route;
+    const covered = cover.order;
+    const bandColumns = this.bandColumns;
+    // Rows below the horizon that a reflection can read back.
+    const bandEnd = Math.ceil(cam.horizon) + 2;
     const season = world.season;
     const weather = world.weather.state;
     const seed = world.seed;
@@ -238,9 +319,24 @@ export class GroundRenderer {
       const detail = 1 - smoothstep(0.6, 3, pixelAlong);
       // Reflections come from the mirrored row of the sky already drawn above.
       const mirrorY = Math.max(0, Math.floor(2 * cam.horizon - y - 1));
+      // Water: the Fresnel term and where glitter can appear depend only on the row.
+      const grazing = Math.exp(-ry / (F * 0.09));
+      const spread = 2 + ry * 0.25;
+      // Glitter only where the water reflects the sun toward us: the row's
+      // depression below the horizon must match the sun's altitude.
+      const depression = Math.atan2(ry, F) / DEG;
+      const sunMatch = Math.exp(-(((depression - sunAlt) / 7) ** 2));
+      const moonMatch = Math.exp(-(((depression - moonAlt) / 7) ** 2));
+      const rowWaterFog = 1 - Math.exp(-z / vis);
 
+      // Rows a reflection may read are kept where visible ground is near.
+      const inBand = y <= bandEnd;
       for (let x = 0; x < W; x++) {
-        if (z > groundLimit[x]) {
+        // Behind a ridge, or painted over later by a near layer.
+        if (
+          z > groundLimit[x] ||
+          (covered[y * W + x] !== Infinity && !(inBand && bandColumns[x] === 1))
+        ) {
           continue;
         }
         const along = cam.pos + ((x + 0.5 - cam.cx) * z) / F;
@@ -362,7 +458,6 @@ export class GroundRenderer {
               Math.min(mirrorY + Math.round(Math.abs(ripple) * amp * 0.3), view.height - 1) * W + rx
             ];
           // Fresnel: water mirrors the sky at grazing angles and shows its own color up close.
-          const grazing = Math.exp(-ry / (F * 0.09));
           const fres = clamp01((sea ? 0.18 : 0.42) + (sea ? 0.72 : 0.5) * grazing);
           let r = (sea ? 22 : 30) * ar;
           let g = (sea ? 58 : 52) * ag;
@@ -406,12 +501,6 @@ export class GroundRenderer {
           const sparkle = hash3(x, y, Math.floor(time * 7));
           const sd = Math.abs(x - sunX);
           const md = Math.abs(x - moonX);
-          const spread = 2 + ry * 0.25;
-          // Glitter only where the water reflects the sun toward us: the row's
-          // depression below the horizon must match the sun's altitude.
-          const depression = Math.atan2(ry, F) / DEG;
-          const sunMatch = Math.exp(-(((depression - sunAlt) / 7) ** 2));
-          const moonMatch = Math.exp(-(((depression - moonAlt) / 7) ** 2));
           if (
             sunGlint > 0 &&
             sd < spread * 3 &&
@@ -429,7 +518,7 @@ export class GroundRenderer {
             g += 175;
             b += 180;
           }
-          const f = 1 - Math.exp(-wz / vis);
+          const f = wz === z ? rowWaterFog : 1 - Math.exp(-wz / vis);
           data[i] = pack(
             r + (fr - r) * f + d * STEP,
             g + (fg - g) * f + d * STEP,

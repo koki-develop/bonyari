@@ -84,7 +84,13 @@ export function intervalCoverage(t: number, lo: number, hi: number, footprint: n
   if (footprint <= 1e-6) {
     return t >= lo && t < hi ? 1 : 0;
   }
-  const a = Math.max(t - footprint / 2, lo);
-  const b = Math.min(t + footprint / 2, hi);
+  const t0 = t - footprint / 2;
+  const t1 = t + footprint / 2;
+  // Exactly 1 when fully inside, so opaque things fully cover what lies behind.
+  if (t0 >= lo && t1 <= hi) {
+    return 1;
+  }
+  const a = Math.max(t0, lo);
+  const b = Math.min(t1, hi);
   return b > a ? (b - a) / footprint : 0;
 }

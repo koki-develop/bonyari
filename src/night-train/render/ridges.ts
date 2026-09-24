@@ -5,6 +5,7 @@ import { bayer, type Surface } from "../core/surface.ts";
 import { makeTerrainScratch, type Route } from "../sim/route.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
+import type { Cover } from "./cover.ts";
 import type { Painter } from "./painter.ts";
 
 interface Ridge {
@@ -134,7 +135,8 @@ export class RidgeRenderer {
     return h;
   }
 
-  prepare(view: Surface, cam: Camera, world: World): void {
+  /** Works out the skylines and marks in `cover` the pixels each ridge paints over opaquely. */
+  prepare(view: Surface, cam: Camera, world: World, cover: Cover): void {
     if (this.groundLimit.length !== view.width) {
       this.groundLimit = new Float32Array(view.width);
       this.heights = RIDGES.map(() => new Float32Array(view.width));
@@ -151,9 +153,14 @@ export class RidgeRenderer {
         const along = cam.alongAt(x, Z);
         const h = this.heightAt(ri, ridge, route, seed, along, cam.focal);
         heights[x] = h;
-        if (h > 0.5 && cam.y(Z, h) < base) {
+        const top = cam.y(Z, h);
+        if (h > 0.5 && top < base) {
           any = true;
           this.groundLimit[x] = Math.min(this.groundLimit[x], Z);
+          // Below its top row the ridge face is opaque down to its foot.
+          const y0 = Math.max(0, Math.floor(top));
+          const y1 = Math.min(view.height - 1, Math.ceil(base));
+          cover.markRun(x, y0 + 1, y1 + 1, Z);
         }
       }
       this.visible[ri] = any;
@@ -165,7 +172,7 @@ export class RidgeRenderer {
    * the sun's side, stands of evergreens among deciduous trees that take on
    * the colors of the season. Far ranges fade into the haze, snow on their tops.
    */
-  draw(ri: number, p: Painter): void {
+  draw(ri: number, p: Painter, cover: Cover): void {
     const { view, cam, world, light, shade } = p;
     const ridge = RIDGES[ri];
     const heights = this.heights[ri];
@@ -177,6 +184,7 @@ export class RidgeRenderer {
     const Z = ridge.lateral;
     const base = cam.y(Z, 0);
     const fogK = shade.fogAt(Z);
+    const covered = cover.order;
     const far = Z > 3000;
     const hazeBody: RGB = mix(
       mix(evergreen, season.leaf, 0.35 * season.leafDensity),
@@ -205,6 +213,10 @@ export class RidgeRenderer {
       let lastRow = Number.NaN;
       let shift = 0;
       for (let y = y0; y <= y1; y++) {
+        // Painted over later by a nearer layer.
+        if (covered[y * view.width + x] < Z) {
+          continue;
+        }
         // Height above ground of this pixel on the ridge face.
         const hy = cam.eye + ((cam.horizon - (y + 0.5)) * Z) / cam.focal;
         let r: number;

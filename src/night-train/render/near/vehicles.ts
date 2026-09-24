@@ -2,6 +2,8 @@ import { hex, pack, type RGB } from "../../core/color.ts";
 import { intervalCoverage, mod, pulseCoverage, smoothstep } from "../../core/math.ts";
 import { hash2, Rng } from "../../core/random.ts";
 import { type Car, ONCOMING_CAR_LENGTH, type OncomingTrain } from "../../sim/traffic.ts";
+import type { Camera } from "../camera.ts";
+import type { Cover } from "../cover.ts";
 import type { Painter } from "../painter.ts";
 
 /** Near face of a train on the adjacent track. */
@@ -32,6 +34,114 @@ const CONTAINERS: readonly RGB[] = [
   "#c9a23a",
 ].map(hex);
 
+/** One column of a passing train: what the drawing and the occlusion both need. */
+interface OncomingColumn {
+  along: number;
+  /** Coverage of the pixel column by the train. */
+  inside: number;
+  /** Distance (m) from the front of the train, the car it falls in and the position within it. */
+  u: number;
+  carIndex: number;
+  inCar: number;
+  loco: boolean;
+  wagon: boolean;
+  /** Container slot on a wagon, whether it is loaded, and the coverage of its box. */
+  slot: number;
+  loaded: boolean;
+  inBox: number;
+}
+
+const ONCOMING_COLUMN: OncomingColumn = {
+  along: 0,
+  inside: 0,
+  u: 0,
+  carIndex: 0,
+  inCar: 0,
+  loco: false,
+  wagon: false,
+  slot: 0,
+  loaded: false,
+  inBox: 0,
+};
+
+/** Fills `out` for column `x`; false where the train isn't. */
+function oncomingColumn(
+  cam: Camera,
+  train: OncomingTrain,
+  footprint: number,
+  x: number,
+  out: OncomingColumn,
+): boolean {
+  const along = cam.alongAt(x, ONCOMING_LATERAL);
+  const tail = train.front - train.cars * ONCOMING_CAR_LENGTH;
+  const inside = intervalCoverage(along, tail, train.front, footprint);
+  if (inside <= 0) {
+    return false;
+  }
+  // Distance from the front of the train, and position within a car.
+  const u = train.front - along;
+  const carIndex = Math.floor(u / ONCOMING_CAR_LENGTH);
+  const inCar = mod(u, ONCOMING_CAR_LENGTH);
+  out.along = along;
+  out.inside = inside;
+  out.u = u;
+  out.carIndex = carIndex;
+  out.inCar = inCar;
+  out.loco = train.freight && carIndex === 0;
+  out.wagon = train.freight && carIndex > 0;
+  // Container slots on the wagons: some carry nothing.
+  const slot = Math.floor(inCar / CONTAINER_PITCH);
+  out.slot = slot;
+  out.loaded = hash2(carIndex * 3 + slot, train.seed ^ 0x33) > 0.14;
+  out.inBox = pulseCoverage(
+    inCar - 0.3 - CONTAINER_PITCH / 2 + 0.25,
+    CONTAINER_PITCH,
+    6.1,
+    footprint,
+  );
+  return true;
+}
+
+/**
+ * Marks the pixels a passing train paints over opaquely: its body below the
+ * roof line; on container wagons, the frame and the containers themselves.
+ */
+export function coverOncoming(
+  cam: Camera,
+  train: OncomingTrain,
+  relativeTravel: number,
+  cover: Cover,
+): void {
+  const lateral = ONCOMING_LATERAL;
+  const footprint = cam.footprint(lateral, relativeTravel);
+  const top = Math.max(0, Math.floor(cam.yRail(lateral, PANTOGRAPH_TOP)));
+  const col = ONCOMING_COLUMN;
+  for (let x = 0; x < cover.width; x++) {
+    if (!oncomingColumn(cam, train, footprint, x, col) || col.inside < 1) {
+      continue;
+    }
+    let runStart = -1;
+    for (let y = top; y < cover.height; y++) {
+      const h = cam.railHeightAt(y, lateral);
+      const opaque =
+        h <= BODY_TOP &&
+        (h < BODY_BOTTOM ||
+          !col.wagon ||
+          h < WAGON_DECK ||
+          (h < CONTAINER_TOP && col.loaded && col.inBox >= 1));
+      if (opaque && runStart < 0) {
+        runStart = y;
+      } else if (!opaque && runStart >= 0) {
+        cover.markRun(x, runStart, y, lateral);
+        runStart = -1;
+      }
+    }
+    if (runStart >= 0) {
+      cover.markRun(x, runStart, cover.height, lateral);
+    }
+  }
+}
+
 /**
  * A train passing on the adjacent track, rendered per pixel with the relative
  * speed as motion blur. Along the train, detail smears away at speed, so the
@@ -52,7 +162,6 @@ export function drawOncoming(
   const lateral = ONCOMING_LATERAL;
   shade.at(lateral);
   const footprint = cam.footprint(lateral, relativeTravel);
-  const tail = train.front - train.cars * ONCOMING_CAR_LENGTH;
   const r = new Rng(train.seed);
   const stripe = r.pick(STRIPES);
   const upperStripe = r.chance(0.4);
@@ -64,19 +173,13 @@ export function drawOncoming(
   const side = p.surfaceLight(0, 0, 1);
   const roofEdge = p.surfaceLight(0, 0.8, 0.6);
   const top = Math.max(0, Math.floor(cam.yRail(lateral, PANTOGRAPH_TOP)));
+  const col = ONCOMING_COLUMN;
   for (let x = 0; x < view.width; x++) {
-    const along = cam.alongAt(x, lateral);
-    const inside = intervalCoverage(along, tail, train.front, footprint);
-    if (inside <= 0) {
+    if (!oncomingColumn(cam, train, footprint, x, col)) {
       continue;
     }
-    // Distance from the front of the train, and position within a car.
-    const u = train.front - along;
-    const carIndex = Math.floor(u / ONCOMING_CAR_LENGTH);
-    const inCar = mod(u, ONCOMING_CAR_LENGTH);
+    const { along, inside, u, carIndex, inCar, loco, wagon, slot, loaded, inBox } = col;
     const gap = pulseCoverage(u + 0.4, ONCOMING_CAR_LENGTH, 0.8, footprint);
-    const loco = train.freight && carIndex === 0;
-    const wagon = train.freight && carIndex > 0;
     // Our windows' light falls on its side in pools.
     const pool =
       night > 0
@@ -87,15 +190,6 @@ export function drawOncoming(
       (wagon ? 0 : 1) *
       (loco || carIndex % 2 === 1 ? 1 : 0) *
       pulseCoverage(inCar - 4.2, ONCOMING_CAR_LENGTH, 1.6, footprint);
-    // Container slots on the wagons: some carry nothing.
-    const slot = Math.floor(inCar / CONTAINER_PITCH);
-    const loaded = hash2(carIndex * 3 + slot, train.seed ^ 0x33) > 0.14;
-    const inBox = pulseCoverage(
-      inCar - 0.3 - CONTAINER_PITCH / 2 + 0.25,
-      CONTAINER_PITCH,
-      6.1,
-      footprint,
-    );
     const box = CONTAINERS[Math.floor(hash2(carIndex * 3 + slot, train.seed) * CONTAINERS.length)];
     // Passengers' heads in the windows, and the seats below them.
     const seat = Math.floor(u / SEAT_PITCH);
