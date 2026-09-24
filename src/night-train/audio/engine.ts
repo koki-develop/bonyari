@@ -15,6 +15,8 @@ const MASTER_LEVEL = 0.8;
 const BELL_LATERAL = 4;
 /** Strikes per second of a crossing bell. */
 const BELL_RATE = 2.2;
+/** Share of the physical Doppler shift applied to the crossing bells. */
+const DOPPLER = 0.35;
 
 interface Loop {
   source: AudioBufferSourceNode;
@@ -65,7 +67,6 @@ export class AudioEngine {
   private readonly terrain = makeTerrainScratch();
   private wasInTunnel = false;
   private nextCreak = 20;
-  private breathSource: AudioBufferSourceNode | null = null;
 
   constructor(seed: number) {
     this.seed = seed;
@@ -308,22 +309,6 @@ export class AudioEngine {
     }
   }
 
-  /** Breathing on the glass. */
-  playBreath(): void {
-    if (!this.bank || !this.ctx) {
-      return;
-    }
-    this.breathSource?.stop();
-    this.breathSource = this.play(
-      this.bank.breath,
-      this.ctx.currentTime,
-      0.28,
-      this.cabinBus,
-      0,
-      this.rng.range(0.92, 1.06),
-    );
-  }
-
   update(world: World, dt: number): void {
     const ctx = this.ctx;
     const bank = this.bank;
@@ -407,7 +392,13 @@ export class AudioEngine {
     const day = smoothstep(5, 7, hour) * (1 - smoothstep(17.5, 19, hour));
     const night = 1 - smoothstep(4.5, 6, hour) + smoothstep(18.5, 20, hour);
     this.cicadas.gain.gain.setTargetAtTime(
-      0.03 * season.cicadas * day * (0.4 + rural * 0.6) * (1 - weather.rain),
+      0.03 *
+        season.cicadas *
+        day *
+        (0.4 + rural * 0.6) *
+        (1 - smoothstep(0.05, 0.35, weather.rain)) *
+        (1 - weather.storm) *
+        (1 - 0.7 * smoothstep(0.5, 1, weather.cloudCover)),
       now,
       1.5,
     );
@@ -494,7 +485,8 @@ export class AudioEngine {
         const dx = c.at - pos;
         const dist = Math.hypot(dx, BELL_LATERAL);
         const approach = (v * dx) / dist;
-        const rate = (1 + approach / SPEED_OF_SOUND) * (st.parity === 0 ? 1 : 0.94);
+        // The true shift at our speed sounds exaggerated on small speakers; keep a hint of it.
+        const rate = (1 + (DOPPLER * approach) / SPEED_OF_SOUND) * (st.parity === 0 ? 1 : 0.94);
         const gain = 0.22 * Math.min(1, 30 / dist);
         this.play(
           bank.crossingBell,
@@ -637,19 +629,35 @@ export class AudioEngine {
     const season = world.season;
     const hour = world.clock.hour;
     const r = this.rng;
-    const quiet = (1 - tunnel) * (1 - world.weather.state.rain * 0.8);
-    if (quiet < 0.05) {
+    if (tunnel > 0.95) {
       return;
     }
-    const chance = (rate: number) => r.chance(rate * dt * quiet);
+    const w = world.weather.state;
+    const dry = 1 - smoothstep(0.05, 0.35, w.rain);
+    const noSnow = 1 - smoothstep(0.02, 0.2, w.snow);
+    const calm = (1 - w.storm) * (1 - smoothstep(0.45, 0.85, w.wind));
+    // Birds sing on fine mornings, not in snow, rain or a gale; a grey sky subdues them.
+    const birds = dry * noSnow * calm * (1 - 0.45 * w.cloudCover) * (1 - 0.6 * w.mist);
+    // Cicadas need warmth and some sun.
+    const cicadas = dry * noSnow * calm * (1 - 0.7 * smoothstep(0.5, 1, w.cloudCover));
+    // Frogs call all the more in a light rain, but not in a downpour or the cold.
+    const frogs =
+      (1 + 0.8 * Math.min(w.rain, 0.5)) * (1 - smoothstep(0.6, 1, w.rain)) * noSnow * (1 - w.storm);
+    // Autumn insects fall silent in rain and wind.
+    const insects = (1 - smoothstep(0.1, 0.4, w.rain)) * noSnow * calm;
+    const chance = (rate: number) => r.chance(rate * dt * (1 - tunnel));
     const morning = bump(hour, 7, 4, 1.5);
     // Spring mornings: the bush warbler.
-    if (chance(0.09 * cyclicBump(season.yearFraction, 0.12, 0.2, 0.05, 1) * morning * rural)) {
+    if (
+      chance(0.09 * birds * cyclicBump(season.yearFraction, 0.12, 0.2, 0.05, 1) * morning * rural)
+    ) {
       this.play(bank.uguisu, now, r.range(0.04, 0.09), this.outsideBus, r.range(-0.8, 0.8));
     }
     if (
       chance(
         0.35 *
+          birds *
+          (0.4 + 0.6 * season.warmth) *
           day *
           (0.3 + world.route.terrain(world.train.pos, this.terrain).houses) *
           (1 - season.cicadas * 0.5),
@@ -664,7 +672,7 @@ export class AudioEngine {
         r.range(0.95, 1.1),
       );
     }
-    if (chance(0.12 * season.cicadas * day * rural)) {
+    if (chance(0.12 * cicadas * season.cicadas * day * rural)) {
       this.play(
         bank.minmin,
         now,
@@ -675,7 +683,7 @@ export class AudioEngine {
       );
     }
     const dusk = bump(hour, 18.2, 1.2, 0.6) + bump(hour, 5, 0.8, 0.5);
-    if (chance(0.15 * season.cicadas * dusk * rural)) {
+    if (chance(0.15 * cicadas * season.cicadas * dusk * rural)) {
       this.play(
         bank.higurashi,
         now,
@@ -686,7 +694,13 @@ export class AudioEngine {
       );
     }
     if (
-      chance(7 * season.frogs * night * world.route.terrain(world.train.pos, this.terrain).fields)
+      chance(
+        7 *
+          frogs *
+          season.frogs *
+          night *
+          world.route.terrain(world.train.pos, this.terrain).fields,
+      )
     ) {
       this.play(
         r.pick(bank.frogs),
@@ -697,7 +711,7 @@ export class AudioEngine {
         r.range(0.85, 1.2),
       );
     }
-    if (chance(3 * season.crickets * night * rural)) {
+    if (chance(3 * insects * season.crickets * night * rural)) {
       const bell = r.chance(0.6);
       this.play(
         bell ? r.pick(bank.suzumushi) : bank.korogi,

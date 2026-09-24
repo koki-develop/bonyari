@@ -31,6 +31,11 @@ function stripedLine(
   }
 }
 
+/** Which of the twin warning lamps (0 or 1) is lit at `time`. */
+export function crossingLampPhase(time: number): number {
+  return Math.floor(time * 1.8) % 2;
+}
+
 function warningPost(p: Painter, along: number, active: boolean, time: number): void {
   const s = p.s;
   const cx = p.x(along);
@@ -47,7 +52,7 @@ function warningPost(p: Painter, along: number, active: boolean, time: number): 
   // Twin red lamps, flashing alternately.
   const ly = p.cam.yRail(p.lateral, 2.85);
   const lr = Math.max(1, 0.16 * s);
-  const phase = Math.floor(time * 1.8) % 2;
+  const phase = crossingLampPhase(time);
   for (const side of [-1, 1] as const) {
     const lx = cx + side * 0.36 * s;
     p.rect(lx - lr - 1, ly - lr - 1, lx + lr + 1, ly + lr + 1, BLACK);

@@ -47,11 +47,8 @@ const overlay = new Overlay({
   onLight: toggleLamp,
 });
 
-const input = new Input(canvas, renderer, {
+new Input(canvas, renderer, {
   toggleLamp,
-  breathe: (x, y, amount) => renderer.glass.breathe(x, y, amount),
-  breathSound: () => audio.playBreath(),
-  wipe: (x0, y0, x1, y1) => renderer.glass.wipe(x0, y0, x1, y1),
   activity: () => {
     overlay.activity();
     audio.wake();
@@ -97,7 +94,6 @@ function frame(now: number): void {
   last = now;
   seconds += dt;
   world.update(dt * dev.timescale);
-  input.update(dt);
   lampOn = approach(lampOn, lampTarget, 9, dt);
   audio.update(world, dt);
   pendingDt += dt;

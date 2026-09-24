@@ -2,10 +2,10 @@ import { hex, pack, type RGB } from "../core/color.ts";
 import { smoothstep } from "../core/math.ts";
 import { hash2 } from "../core/random.ts";
 import { Surface } from "../core/surface.ts";
-import { drawClock } from "./clock-display.ts";
+import { drawTableClock, TABLE_CLOCK_WIDTH } from "./clock-display.ts";
 import type { Layout, Rect } from "./layout.ts";
 
-const WALL: RGB = hex("#d8caa9");
+const WALL: RGB = hex("#cfb690");
 const WALL_SHADE: RGB = hex("#bfae8c");
 const WAINSCOT: RGB = hex("#6e5139");
 const WOOD_TOP: RGB = hex("#b58d5f");
@@ -19,22 +19,87 @@ const BRASS: RGB = hex("#b8964a");
 const SHADE: RGB = hex("#efe3c6");
 const WARM: RGB = [255, 222, 178];
 const NIGHT_LIGHT: RGB = [10, 12, 22];
+/** Width (px) of the ticket lying on the table. */
+const TICKET_WIDTH = 13;
+
+/**
+ * A light source just outside the window (a tunnel lamp, platform lights, a
+ * passing train's windows): screen position and color already scaled by
+ * brightness and distance.
+ */
+export interface NearLight {
+  x: number;
+  y: number;
+  r: number;
+  g: number;
+  b: number;
+}
+
+/** Direct sunlight falling through the window onto the table. */
+export interface SunPatch {
+  /** 0..1 */
+  intensity: number;
+  color: RGB;
+  /** Sideways shift (px) of the lit patch per pixel of table depth. */
+  slope: number;
+  /** Table depth (0 = against the wall, 1 = front edge) where the sunlight starts. */
+  depth: number;
+}
 
 export interface InteriorFrame {
+  dt: number;
+  /** Real seconds, for flicker, steam and the clock's glow. */
+  seconds: number;
   /** Car lights on. */
   lampOn: number;
-  /** Average color of the view outside, which lights the car through the window. */
+  /** Average color of the view outside. */
   outside: RGB;
+  /** Lights close outside the window, which throw light into the car. */
+  lights: readonly NearLight[];
+  sun: SunPatch | null;
   /** Vertical jolt in pixels, for things on the table. */
   jolt: number;
+  /** Sideways sway of the car, -1..1, which sets the curtain tassels swinging. */
+  sway: number;
   /** Train acceleration, tilting the tea in the bottle. */
   traction: number;
-  /** Text for the dot-matrix clock. */
+  /** In-world time for the table clock. */
   time: string;
-  seasonIndex: number;
-  /** Real seconds, for the lamp flicker and the clock's glow. */
-  seconds: number;
   sillSnow: number;
+  /** Condensation on the glass, which also beads on the window frame. */
+  condensation: number;
+  /** What the table holds changes a little at every station. */
+  stationsVisited: number;
+  warmth: number;
+  hour: number;
+}
+
+type TableItem = "mikan" | "frozenMikan" | "ekiben" | "coffee" | "book" | "can";
+
+/** Picks what lies on the table after a stop, from what suits the season and hour. */
+function chooseItems(visited: number, warmth: number, hour: number): TableItem[] {
+  const pool: TableItem[] = ["book", "can", "ekiben"];
+  if (warmth < 0.35) {
+    pool.push("mikan", "mikan");
+  }
+  if (warmth > 0.7) {
+    pool.push("frozenMikan", "frozenMikan");
+  }
+  if (hour > 5 && hour < 11) {
+    pool.push("coffee", "coffee");
+  }
+  const out: TableItem[] = [];
+  for (let slot = 0; slot < 2; slot++) {
+    // Some slots stay empty.
+    if (hash2(visited * 7 + slot, 41) < 0.25) {
+      continue;
+    }
+    const item = pool[Math.floor(hash2(visited * 13 + slot, 42) * pool.length)];
+    if (!out.includes(item)) {
+      out.push(item);
+    }
+  }
+  return out;
 }
 
 function inRoundedRect(x: number, y: number, r: Rect, radius: number): boolean {
@@ -58,6 +123,17 @@ export class Interior {
   private readonly lampLight: Float32Array;
   private readonly windowLight: Float32Array;
   private readonly glassRadius = 3;
+  /** Tassel pendulums on the two curtain tiebacks: angle and angular velocity. */
+  private readonly tassels = [
+    { angle: 0, velocity: 0 },
+    { angle: 0, velocity: 0 },
+  ];
+  private items: TableItem[] = [];
+  private lastSway = 0;
+  private wasJolted = false;
+  /** Light thrown into the car by nearby sources this frame (RGB, 0..1 per unit albedo). */
+  private readonly thrown: Float32Array;
+  private itemsFor = -1;
 
   constructor(layout: Layout) {
     this.layout = layout;
@@ -66,6 +142,7 @@ export class Interior {
     this.mask = new Uint8Array(width * height);
     this.lampLight = new Float32Array(width * height);
     this.windowLight = new Float32Array(width * height);
+    this.thrown = new Float32Array(width * height * 3);
     this.paint();
     this.computeLight();
   }
@@ -97,18 +174,26 @@ export class Interior {
       }
     };
 
-    // Walls: cream above, wood wainscot below the table.
+    // Walls: pale wood-grain laminate in panels, darker wood below the table.
+    const seam = 40;
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        const panelSeam = x % 48 === 0 ? 0.93 : 1;
-        const v = 0.96 + hash2(x, y) * 0.04;
+        const grain =
+          0.95 +
+          0.05 * Math.sin(x * 0.8 + Math.sin(y * 0.045 + x * 0.3) * 1.8) +
+          hash2(x, y) * 0.03;
+        const edge = x % seam === 0 ? 0.84 : x % seam === 1 ? 1.05 : 1;
         const t = y / height;
-        const c: RGB = [
-          WALL[0] * v * panelSeam * (1 - t * 0.08),
-          WALL[1] * v * panelSeam * (1 - t * 0.08),
-          WALL[2] * v * panelSeam * (1 - t * 0.08),
-        ];
-        set(x, y, c);
+        const k = grain * edge * (1 - t * 0.08);
+        set(x, y, [WALL[0] * k, WALL[1] * k, WALL[2] * k]);
+      }
+    }
+    // Screws at the top and bottom of every panel seam.
+    const rackRow = Math.max(1, Math.round(win.y * 0.2));
+    for (let x = seam; x < width; x += seam) {
+      for (const y of [rackRow + 7, table.y - 3]) {
+        set(x - 2, y, [WALL[0] * 0.62, WALL[1] * 0.6, WALL[2] * 0.58]);
+        set(x - 2, y - 1, [WALL[0] * 1.12, WALL[1] * 1.1, WALL[2] * 1.08]);
       }
     }
     const wainTop = table.y + table.h;
@@ -204,7 +289,27 @@ export class Interior {
     this.paintCurtain(set, win, outer, curtain, -1);
     this.paintCurtain(set, win, outer, curtain, 1);
     this.paintLamp(fill, set);
-    this.paintTicket(set);
+    this.paintPlate(fill, set);
+  }
+
+  /** The car and berth number plate: brass, with engraved lettering. */
+  private paintPlate(
+    fill: (x0: number, y0: number, x1: number, y1: number, c: RGB) => void,
+    set: (x: number, y: number, c: RGB) => void,
+  ): void {
+    const p = this.layout.plate;
+    fill(p.x, p.y, p.x + p.w, p.y + p.h, [BRASS[0] * 0.8, BRASS[1] * 0.8, BRASS[2] * 0.8]);
+    fill(p.x + 1, p.y + 1, p.x + p.w - 1, p.y + p.h - 1, [226, 212, 176]);
+    // Car number, a divider, and the berth number.
+    for (let x = p.x + 2; x < p.x + p.w - 2; x++) {
+      for (let y = p.y + 2; y < p.y + p.h - 2; y++) {
+        const col = x - p.x - 2;
+        const divider = col === 9;
+        if (divider || ((col + 1) % 4 !== 0 && hash2(col, y - p.y) < 0.55)) {
+          set(x, y, divider ? [150, 130, 90] : [70, 56, 40]);
+        }
+      }
+    }
   }
 
   /** Gathered curtain tied back at one side of the window. */
@@ -262,20 +367,6 @@ export class Interior {
     }
   }
 
-  private paintTicket(set: (x: number, y: number, c: RGB) => void): void {
-    const { window: win, table } = this.layout;
-    const tx = Math.round(win.x + win.w * 0.26);
-    const ty = table.y + Math.max(1, Math.round(table.h * 0.35));
-    const len = 11;
-    for (let y = 0; y < 3; y++) {
-      for (let x = 0; x < len; x++) {
-        const px = tx + x + y;
-        const printed = y === 1 && x > 1 && x < len - 2 && hash2(x, 91) < 0.55;
-        set(px, ty + y, printed ? [60, 52, 48] : x === len - 1 ? [60, 60, 70] : [242, 204, 150]);
-      }
-    }
-  }
-
   private computeLight(): void {
     const { width, height, window: win, lamp } = this.layout;
     const lx = lamp.x + 4.5;
@@ -310,22 +401,339 @@ export class Interior {
     const nr = NIGHT_LIGHT[0] / 255;
     const ng = NIGHT_LIGHT[1] / 255;
     const nb = NIGHT_LIGHT[2] / 255;
+    this.throwLights(f.lights);
+    const thrown = this.thrown;
+    // Daylight through the window: an even fill that fades away from the glass.
+    const dr = or / 255;
+    const dg = og / 255;
+    const db = ob / 255;
     for (let i = 0; i < width * height; i++) {
       if (this.mask[i] === 0) {
         continue;
       }
+      const wl = this.windowLight[i] * 1.25;
       const c = alb[i];
       const ll = this.lampLight[i];
-      const wl = this.windowLight[i] * 1.25;
-      const r = (c & 255) * (lr * ll + (or / 255) * wl + nr + 0.06 * (or / 255));
-      const g = ((c >>> 8) & 255) * (lg * ll + (og / 255) * wl + ng + 0.06 * (og / 255));
-      const b = ((c >>> 16) & 255) * (lb * ll + (ob / 255) * wl + nb + 0.06 * (ob / 255));
+      const t = i * 3;
+      const r = (c & 255) * (lr * ll + dr * wl + thrown[t] + nr + 0.06 * dr);
+      const g = ((c >>> 8) & 255) * (lg * ll + dg * wl + thrown[t + 1] + ng + 0.06 * dg);
+      const b = ((c >>> 16) & 255) * (lb * ll + db * wl + thrown[t + 2] + nb + 0.06 * db);
       out[i] = pack(r, g, b);
     }
+    if (f.sun) {
+      this.renderSunPatch(screen, f.sun);
+    }
     this.renderSillSnow(screen, f);
+    this.renderCondensation(screen, f);
+    this.renderTassels(screen, f);
     this.renderLamp(screen, f);
-    this.renderBottle(screen, f);
-    drawClock(screen, this.layout.clock, f.time, f.seasonIndex, f.seconds, lamp);
+    this.renderTable(screen, f);
+  }
+
+  /**
+   * Each nearby light casts a soft, wide pool into the car: brightest on the
+   * sill, table and curtains beside it, fading with distance from the window.
+   * Pools are offset and stretched diagonally away from the light, the way
+   * light through a window lands, rather than dropping straight down.
+   */
+  private throwLights(lights: readonly NearLight[]): void {
+    const { width, height, window: win } = this.layout;
+    const thrown = this.thrown;
+    thrown.fill(0);
+    const sx = Math.max(18, win.w * 0.12);
+    const sy = Math.max(22, win.h * 0.35);
+    const midY = win.y + win.h / 2;
+    for (const l of lights) {
+      // Light from above lands low, from below lands high: mirror across the window's middle.
+      const cy = midY + (midY - l.y) * 0.6;
+      const x0 = Math.max(0, Math.floor(l.x - sx * 3));
+      const x1 = Math.min(width, Math.ceil(l.x + sx * 3));
+      const y0 = Math.max(0, Math.floor(cy - sy * 3));
+      const y1 = Math.min(height, Math.ceil(cy + sy * 3));
+      for (let y = y0; y < y1; y++) {
+        const dy = (y - cy) / sy;
+        // The pool leans away from the light as it spreads from the window.
+        const lean = (y - midY) * 0.35 * Math.sign(l.x - (win.x + win.w / 2));
+        for (let x = x0; x < x1; x++) {
+          const i = y * width + x;
+          const reach = this.windowLight[i];
+          if (reach < 0.02 || this.mask[i] === 0) {
+            continue;
+          }
+          const dx = (x - l.x + lean) / sx;
+          const k = Math.exp(-0.5 * (dx * dx + dy * dy)) * reach;
+          const t = i * 3;
+          thrown[t] += l.r * k;
+          thrown[t + 1] += l.g * k;
+          thrown[t + 2] += l.b * k;
+        }
+      }
+    }
+  }
+
+  /** Low sun streams through the window and lays a warm patch across the table. */
+  private renderSunPatch(screen: Surface, sun: SunPatch): void {
+    const { window: win, table, curtain } = this.layout;
+    const rows = table.h - 2;
+    for (let y = table.y; y < table.y + rows; y++) {
+      const depth = (y - table.y) / Math.max(1, rows - 1);
+      if (depth < sun.depth) {
+        continue;
+      }
+      const shift = -sun.slope * (y - table.y) * 2;
+      const x0 = Math.round(win.x + curtain * 0.6 + shift);
+      const x1 = Math.round(win.x + win.w - curtain * 0.6 + shift);
+      const fade = Math.min(1, (depth - sun.depth) * 6);
+      const k = sun.intensity * fade * 0.55;
+      for (let x = Math.max(table.x, x0); x < Math.min(table.x + table.w, x1); x++) {
+        const edge = x === x0 || x === x1 - 1 ? 0.5 : 1;
+        screen.add(x, y, sun.color[0] * k * edge, sun.color[1] * k * edge, sun.color[2] * k * edge);
+      }
+    }
+  }
+
+  /** Beads of condensation along the bottom of the window frame. */
+  private renderCondensation(screen: Surface, f: InteriorFrame): void {
+    if (f.condensation < 0.15) {
+      return;
+    }
+    const win = this.layout.window;
+    const y = win.y + win.h;
+    const [or, og, ob] = f.outside;
+    const glint = 18 + (0.25 * (or + og + ob)) / 3 + f.lampOn * 22;
+    for (let x = win.x + 2; x < win.x + win.w - 2; x++) {
+      const h = hash2(x, 77);
+      if (h < f.condensation * 0.12) {
+        screen.add(x, y, glint * 0.6, glint * 0.62, glint * 0.66);
+        if (h < f.condensation * 0.03) {
+          screen.add(x, y + 1, glint * 0.4, glint * 0.42, glint * 0.46);
+        }
+      }
+    }
+  }
+
+  /** Tassels hanging from the curtain tiebacks swing with the car. */
+  private renderTassels(screen: Surface, f: InteriorFrame): void {
+    const { window: win, curtain } = this.layout;
+    const tie = Math.round(win.y + win.h * 0.62);
+    const dt = Math.min(f.dt, 1 / 20);
+    const light = this.lightFor(f);
+    const swayRate = dt > 0 ? (f.sway - this.lastSway) / dt : 0;
+    this.lastSway = f.sway;
+    const kick = f.jolt > 0 && !this.wasJolted;
+    this.wasJolted = f.jolt > 0;
+    this.tassels.forEach((t, i) => {
+      // A lightly damped pendulum: nudged by every rail joint, swung by the
+      // car rocking and leaning into curves.
+      if (kick) {
+        t.velocity += (i === 0 ? 1 : -0.8) * (0.45 + 0.25 * Math.sin(f.seconds * 3.1 + i));
+      }
+      const force = -24 * t.angle - 1.5 * t.velocity - swayRate * 3;
+      t.velocity += force * dt;
+      t.angle = Math.max(-0.7, Math.min(0.7, t.angle + t.velocity * dt));
+      const ax =
+        i === 0
+          ? win.x + Math.round(curtain * 0.45)
+          : win.x + win.w - Math.round(curtain * 0.45) - 1;
+      const cord = 6;
+      const dx = Math.sin(t.angle);
+      const cordColor = light(TIEBACK[0] * 0.8, TIEBACK[1] * 0.8, TIEBACK[2] * 0.8);
+      for (let k = 1; k <= cord; k++) {
+        screen.set(Math.round(ax + dx * k), tie + 1 + Math.round(k * Math.cos(t.angle)), cordColor);
+      }
+      // The tassel: a knot, then threads fanning out below.
+      const bx = ax + dx * (cord + 1);
+      const by = tie + 2 + Math.round(cord * Math.cos(t.angle));
+      for (let yy = 0; yy < 4; yy++) {
+        const half = yy === 0 ? 0 : yy === 1 ? 1 : 1.5;
+        const cx = Math.round(bx + dx * yy);
+        for (let xx = Math.round(-half); xx <= Math.round(half); xx++) {
+          const k = yy === 0 ? 1.1 : yy === 3 ? 0.7 : 0.95;
+          screen.set(cx + xx, by + yy, light(TIEBACK[0] * k, TIEBACK[1] * k, TIEBACK[2] * k));
+        }
+      }
+    });
+  }
+
+  /** Color lighting for small moving things: the car light plus what comes in through the window. */
+  private lightFor(f: InteriorFrame): (r: number, g: number, b: number, extra?: number) => number {
+    const [or, og, ob] = f.outside;
+    return (r, g, b, extra = 0) => {
+      const k = f.lampOn * 0.85 + extra;
+      return pack(
+        r * (k + (or / 255) * 0.9 + 0.05),
+        g * (k + (og / 255) * 0.9 + 0.05),
+        b * (k + (ob / 255) * 0.9 + 0.06),
+      );
+    };
+  }
+
+  /** The clock, the bottle and whatever else is on the table. */
+  private renderTable(screen: Surface, f: InteriorFrame): void {
+    const { window: win, table } = this.layout;
+    if (this.itemsFor !== f.stationsVisited) {
+      this.itemsFor = f.stationsVisited;
+      this.items = chooseItems(f.stationsVisited, f.warmth, f.hour);
+    }
+    const light = this.lightFor(f);
+    const base = table.y + Math.max(2, Math.round(table.h * 0.55)) - Math.round(f.jolt);
+    // Everything sits together in one spot, the way you'd leave it within reach.
+    const widths: Record<TableItem, number> = {
+      mikan: 9,
+      frozenMikan: 9,
+      ekiben: 11,
+      coffee: 5,
+      book: 10,
+      can: 3,
+    };
+    const bottleW = Math.max(
+      5,
+      Math.round(Math.max(13, Math.round(this.layout.height * 0.085)) * 0.36),
+    );
+    const gap = 4;
+    const total =
+      TABLE_CLOCK_WIDTH +
+      gap +
+      TICKET_WIDTH +
+      gap +
+      this.items.reduce((sum, it) => sum + widths[it] + gap, 0) +
+      bottleW;
+    const center = win.x + win.w * (this.layout.portrait ? 0.5 : 0.62);
+    let x = Math.round(center - total / 2);
+    drawTableClock(screen, x, base, f.time, f.seconds, light);
+    x += TABLE_CLOCK_WIDTH + gap;
+    this.renderTicket(screen, x, base, light);
+    x += TICKET_WIDTH + gap;
+    for (const item of this.items) {
+      this.renderItem(screen, item, x, base, f, light);
+      x += widths[item] + gap;
+    }
+    this.renderBottle(screen, f, x + Math.round(bottleW / 2));
+  }
+
+  /** A train ticket lying flat. */
+  private renderTicket(
+    screen: Surface,
+    x: number,
+    base: number,
+    light: (r: number, g: number, b: number, extra?: number) => number,
+  ): void {
+    const y = base - 2;
+    for (let row = 0; row < 3; row++) {
+      for (let col = 0; col < TICKET_WIDTH - 2; col++) {
+        const px = x + col + row;
+        const printed = row === 1 && col > 1 && col < TICKET_WIDTH - 4 && hash2(col, 91) < 0.55;
+        const c: RGB = printed
+          ? [60, 52, 48]
+          : col === TICKET_WIDTH - 3
+            ? [60, 60, 70]
+            : [242, 204, 150];
+        screen.set(px, y + row, light(c[0], c[1], c[2]));
+      }
+    }
+  }
+
+  private renderItem(
+    screen: Surface,
+    item: TableItem,
+    x: number,
+    base: number,
+    f: InteriorFrame,
+    light: (r: number, g: number, b: number, extra?: number) => number,
+  ): void {
+    const dot = (xx: number, yy: number, c: RGB, extra = 0) =>
+      screen.set(xx, yy, light(c[0], c[1], c[2], extra));
+    const ball = (cx: number, cy: number, r: number, c: RGB) => {
+      for (let yy = Math.floor(cy - r); yy <= Math.ceil(cy + r); yy++) {
+        for (let xx = Math.floor(cx - r); xx <= Math.ceil(cx + r); xx++) {
+          const d = Math.hypot(xx + 0.5 - cx, yy + 0.5 - cy);
+          if (d <= r) {
+            const k = 1.1 - ((yy - (cy - r)) / (2 * r)) * 0.35;
+            dot(xx, yy, [c[0] * k, c[1] * k, c[2] * k], xx < cx && yy < cy ? 0.15 : 0);
+          }
+        }
+      }
+    };
+    switch (item) {
+      case "mikan": {
+        ball(x + 2, base - 2, 2.2, [236, 140, 30]);
+        ball(x + 6, base - 2, 2.2, [240, 150, 40]);
+        ball(x + 4, base - 5, 2.2, [232, 132, 28]);
+        dot(x + 4, base - 7, [70, 120, 50]);
+        break;
+      }
+      case "frozenMikan": {
+        // Four frozen mandarins in a red net, frosted.
+        for (const [cx, cy] of [
+          [x + 2, base - 2],
+          [x + 6, base - 2],
+          [x + 3, base - 5],
+          [x + 6, base - 5],
+        ]) {
+          ball(cx, cy, 2, [238, 170, 90]);
+        }
+        for (let yy = base - 7; yy < base; yy += 2) {
+          for (let xx = x; xx < x + 9; xx++) {
+            if ((xx + yy) % 3 === 0) {
+              dot(xx, yy, [200, 40, 40]);
+            }
+          }
+        }
+        break;
+      }
+      case "ekiben": {
+        // An empty lunch box, lid on, tied with string.
+        for (let yy = base - 4; yy < base; yy++) {
+          for (let xx = x; xx < x + 11; xx++) {
+            const top = yy === base - 4;
+            const c: RGB = top ? [236, 226, 200] : [196, 60, 50];
+            dot(xx, yy, xx === x + 5 ? [240, 236, 220] : c);
+          }
+        }
+        dot(x + 3, base - 3, [240, 200, 80]);
+        dot(x + 8, base - 2, [240, 200, 80]);
+        break;
+      }
+      case "coffee": {
+        // A paper cup with a sleeve, steaming.
+        for (let yy = base - 7; yy < base; yy++) {
+          const half = yy === base - 7 ? 2 : 2 - Math.floor((yy - (base - 7)) / 4);
+          for (let xx = x + 2 - half; xx <= x + 2 + half; xx++) {
+            const sleeve = yy > base - 5 && yy < base - 1;
+            dot(xx, yy, sleeve ? [150, 110, 70] : [242, 240, 234]);
+          }
+        }
+        for (let k = 0; k < 3; k++) {
+          const t = (f.seconds * 0.35 + k / 3) % 1;
+          const sx = x + 2 + Math.round(Math.sin(t * 6 + k) * 1.2);
+          const sy = base - 8 - Math.round(t * 6);
+          screen.blend(sx, sy, 240, 240, 240, 0.28 * (1 - t));
+        }
+        break;
+      }
+      case "book": {
+        // A paperback lying face down.
+        for (let yy = base - 2; yy < base; yy++) {
+          for (let xx = x; xx < x + 10; xx++) {
+            dot(xx, yy, yy === base - 2 ? [60, 90, 130] : [236, 232, 220]);
+          }
+        }
+        dot(x + 9, base - 2, [236, 232, 220]);
+        break;
+      }
+      case "can": {
+        for (let yy = base - 6; yy < base; yy++) {
+          for (let xx = x; xx < x + 3; xx++) {
+            const top = yy === base - 6;
+            const c: RGB = top ? [200, 200, 204] : yy < base - 3 ? [140, 80, 50] : [236, 226, 200];
+            dot(xx, yy, c, xx === x ? 0.2 : 0);
+          }
+        }
+        break;
+      }
+    }
+    // Contact shadow.
+    screen.blendRect(x - 1, base, 12, 1, [0, 0, 0], 0.2);
   }
 
   private renderSillSnow(screen: Surface, f: InteriorFrame): void {
@@ -396,11 +804,11 @@ export class Interior {
     }
   }
 
-  private renderBottle(screen: Surface, f: InteriorFrame): void {
-    const { window: win, table } = this.layout;
+  private renderBottle(screen: Surface, f: InteriorFrame, cx: number): void {
+    const { table } = this.layout;
     const h = Math.max(13, Math.round(this.layout.height * 0.085));
     const w = Math.max(5, Math.round(h * 0.36));
-    const x0 = Math.round(win.x + win.w * 0.74);
+    const x0 = cx;
     const base = table.y + Math.max(2, Math.round(table.h * 0.55)) - Math.round(f.jolt);
     const top = base - h;
     const light = (c: RGB, extra = 0): number => {

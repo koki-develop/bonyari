@@ -242,7 +242,7 @@ export function drawBamboo(p: Painter, o: Scenery): void {
   const height = r.range(9, 14);
   const cx = p.x(o.along);
   const base = Math.round(p.y(0));
-  const width = r.range(4, 7) * s;
+  const width = r.range(8, 14) * s;
   const color = mix(BAMBOO, p.world.season.grass, 0.25);
   // A grove: slender culms clothed in feathery leaves most of the way up,
   // the tips bowing over.

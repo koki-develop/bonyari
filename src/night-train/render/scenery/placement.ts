@@ -96,7 +96,10 @@ export function placeScenery(out: Scenery[], cam: Camera, world: World, table: T
       const h = (k: number) => hash3(c, bi * 131 + k, seed);
       const along = (c + 0.15 + h(1) * 0.7) * band.cell;
       const lateral = band.min + h(2) * (band.max - band.min);
-      const kind = chooseKind(bi, mid, h, table, along, season.dryingRacks);
+      const kind =
+        bambooGrove(along, lateral, table, seed) && h(5) < 0.92
+          ? "bamboo"
+          : chooseKind(bi, mid, h, table, along, season.dryingRacks);
       if (kind && fits(kind, along, lateral, table, obstacles)) {
         out.push({ kind, along, lateral, seed: hashU32(c * 977 + bi * 7919 + seed) });
       }
@@ -174,9 +177,6 @@ function chooseKind(
     if (pick < 0.45) {
       return "cedar";
     }
-    if (pick < 0.58 && mid < 150) {
-      return "bamboo";
-    }
     if (pick < 0.66 && houses > 0.05) {
       return "sakura";
     }
@@ -196,6 +196,28 @@ function chooseKind(
     return "sakura";
   }
   return pick < 0.55 ? "broadleaf" : null;
+}
+
+/** Along-track length (m) of the stretches in which a bamboo grove may stand. */
+const GROVE_ZONE = 260;
+
+/**
+ * Bamboo grows in dense groves, typically on the slope behind a farmhouse or
+ * at the foot of a hill, not as scattered clumps. A few stretches of rural
+ * line get one grove each, occupying a compact patch of ground.
+ */
+function bambooGrove(along: number, lateral: number, table: TerrainTable, seed: number): boolean {
+  const zone = Math.floor(along / GROVE_ZONE);
+  const houses = table.at(table.houses, along);
+  const rural = table.at(table.fields, along) + table.at(table.forest, along);
+  if (houses > 0.4 || rural < 0.5 || hash3(zone, seed, 88) > 0.18) {
+    return false;
+  }
+  const center = (zone + 0.25 + hash3(zone, seed, 89) * 0.5) * GROVE_ZONE;
+  const halfLength = 25 + hash3(zone, seed, 90) * 35;
+  const near = 20 + hash3(zone, seed, 91) * 50;
+  const depth = 25 + hash3(zone, seed, 92) * 45;
+  return Math.abs(along - center) < halfLength && lateral > near && lateral < near + depth;
 }
 
 /** Physical footprint half-depth (m) used for clearance checks. */

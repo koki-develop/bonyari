@@ -17,7 +17,6 @@ export interface SoundBank {
   crackle: AudioBuffer;
   dropTicks: AudioBuffer[];
   click: AudioBuffer;
-  breath: AudioBuffer;
   pressure: AudioBuffer;
   uguisu: AudioBuffer;
   sparrows: AudioBuffer[];
@@ -344,25 +343,6 @@ const click: Build = (ctx, noise, r) => {
   chain(o, envelope(ctx, 0, 0.001, 0.03, 0.4), ctx.destination);
 };
 
-/** A soft "haa" on the glass. */
-const breath: Build = (ctx, noise, r) => {
-  const src = noiseBurst(ctx, noise, 0, 1.3, r.next());
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0, 0);
-  g.gain.linearRampToValueAtTime(0.6, 0.12);
-  g.gain.setValueAtTime(0.6, 0.5);
-  g.gain.setTargetAtTime(0, 0.5, 0.18);
-  const f1 = filter(ctx, "bandpass", 850, 1.2);
-  const f2 = filter(ctx, "bandpass", 1650, 1.5);
-  const mix = ctx.createGain();
-  chain(src, g);
-  g.connect(f1);
-  g.connect(f2);
-  f1.connect(mix);
-  f2.connect(mix);
-  mix.connect(ctx.destination);
-};
-
 const pressure: Build = (ctx, noise, r) => {
   const o = tone(ctx, "sine", 32, 0, 1);
   chain(o, envelope(ctx, 0, 0.02, 0.5, 0.9), ctx.destination);
@@ -571,7 +551,6 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     crack,
     ticks,
     clk,
-    breathe,
     press,
     warbler,
     sparrows,
@@ -596,7 +575,6 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     render(1.8, crackle),
     Promise.all([0, 1, 2, 3].map((v) => render(0.06, dropTick(v)))),
     render(0.12, click),
-    render(1.3, breath),
     render(1.1, pressure),
     render(2.0, uguisu),
     Promise.all([0, 1, 2].map((v) => render(0.5, sparrow(v)))),
@@ -622,7 +600,6 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     crackle: crack,
     dropTicks: ticks,
     click: clk,
-    breath: breathe,
     pressure: press,
     uguisu: warbler,
     sparrows,

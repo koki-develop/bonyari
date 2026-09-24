@@ -18,8 +18,8 @@ export interface Layout {
   horizon: number;
   /** Focal length in art pixels. */
   focal: number;
-  /** Dot-matrix clock panel above the window. */
-  clock: Rect;
+  /** Car and berth number plate above the window. */
+  plate: Rect;
   /** Reading lamp beside the window: the interior light switch. */
   lamp: Rect;
   /** Table top under the window. */
@@ -47,13 +47,14 @@ export function computeLayout(deviceWidth: number, deviceHeight: number): Layout
     h: Math.max(1, height - top - bottom),
   };
 
-  const clockW = 33;
-  const clockH = 11;
-  const clock: Rect = {
-    x: Math.round(width / 2 - clockW / 2),
-    y: Math.max(2, Math.round(top / 2 - clockH / 2) - 1),
-    w: clockW,
-    h: clockH,
+  // The car and berth number plate on the wall above the window.
+  const plateW = 17;
+  const plateH = 6;
+  const plate: Rect = {
+    x: Math.round(width / 2 - plateW / 2),
+    y: Math.max(2, Math.round(top / 2 - plateH / 2)),
+    w: plateW,
+    h: plateH,
   };
   // A small sconce on the wall above the window's left corner.
   const lamp: Rect = { x: side + 10, y: top - 17, w: 9, h: 12 };
@@ -69,7 +70,7 @@ export function computeLayout(deviceWidth: number, deviceHeight: number): Layout
     // Tall windows show more sky.
     horizon: Math.round(window.h * (portrait ? 0.64 : 0.56)),
     focal: 0.42 * Math.sqrt(window.w * window.h),
-    clock,
+    plate,
     lamp,
     table,
     curtain: Math.max(5, Math.round(window.w * 0.035)),

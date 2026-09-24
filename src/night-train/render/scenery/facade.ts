@@ -547,13 +547,15 @@ export function vendingMachine(
   const top = Math.round(y(1.83));
   const bottom = Math.round(y(0));
   const lamps = p.light.lamps;
-  const glowOn = 0.35 + 0.65 * lamps;
+  // Lit, but not a floodlight: a soft panel glow that barely spills.
+  const glowOn = 0.55 + 0.4 * lamps;
+  const panel: RGB = [214, 226, 234];
   // Body with a darker side edge.
   p.rect(x0, top, x1, bottom, body);
   p.rect(x1 - Math.max(1, Math.round(0.08 * s)), top, x1, bottom, shadeRGB(body, 0.78));
   if (s < 4) {
-    p.lightRect(x0 + 1, y(1.6), x1 - 1, y(1.0), [236, 244, 255], glowOn);
-    p.glow(cx, (top + bottom) / 2, Math.max(3, 1.6 * s), [210, 225, 255], 0.35 * lamps);
+    p.lightRect(x0 + 1, y(1.6), x1 - 1, y(1.0), panel, glowOn);
+    p.glow(cx, (top + bottom) / 2, Math.max(2, 1.1 * s), [190, 210, 240], 0.1 * lamps);
     return;
   }
   // Header panel.
@@ -562,7 +564,7 @@ export function vendingMachine(
   // The display window: three shelves of sample drinks behind glass.
   const winTop = header + 1;
   const winBottom = Math.round(y(0.98));
-  p.lightRect(x0 + 1, winTop, x1 - 2, winBottom, [236, 244, 255], glowOn);
+  p.lightRect(x0 + 1, winTop, x1 - 2, winBottom, panel, glowOn);
   const rows = 3;
   const inner = x1 - 2 - (x0 + 1);
   for (let row = 0; row < rows; row++) {
@@ -601,8 +603,8 @@ export function vendingMachine(
   p.rect(x0 + 2, slotTop, x1 - 3, Math.max(slotTop + 1, slotBottom), [26, 26, 30]);
   // Light spills onto the ground in front at night.
   if (lamps > 0.1) {
-    p.glow(cx, bottom, Math.max(4, 1.8 * s), [200, 220, 255], 0.3 * lamps);
-    p.glow(cx, (winTop + winBottom) / 2, Math.max(4, 1.4 * s), [210, 225, 255], 0.22 * lamps);
+    p.glow(cx, bottom, Math.max(3, 1.3 * s), [180, 200, 235], 0.09 * lamps);
+    p.glow(cx, (winTop + winBottom) / 2, Math.max(3, 1.1 * s), [190, 210, 240], 0.06 * lamps);
   }
   // A recycling bin for empties beside it.
   if (hash3(seed, 3, 3) < 0.7) {

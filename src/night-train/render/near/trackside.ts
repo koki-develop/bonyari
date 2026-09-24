@@ -18,7 +18,9 @@ export const TRUSS_LATERAL_SINGLE = 2.7;
 export const TRUSS_LATERAL_DOUBLE = 6.3;
 const TRUSS_PANEL = 8;
 const TRUSS_HEIGHT = 7.2;
-const TUNNEL_LAMP_SPACING = 50;
+export const TUNNEL_LAMP_SPACING = 50;
+/** Height (m above the rails) of the tunnel lamps. */
+export const TUNNEL_LAMP_HEIGHT = 3.6;
 
 const POLE: RGB = [132, 128, 122];
 const WIRE: RGB = [34, 34, 38];
@@ -221,7 +223,7 @@ export function drawTunnel(
   const lateral = TUNNEL_LATERAL;
   const footprint = cam.footprint(lateral);
   const s = cam.scale(lateral);
-  const lampY = cam.yRail(lateral, 3.6);
+  const lampY = cam.yRail(lateral, TUNNEL_LAMP_HEIGHT);
   const lampH = Math.max(1, 0.25 * s);
   const ductY = cam.yRail(lateral, 1.3);
   const [ar, ag, ab] = light.ambient;

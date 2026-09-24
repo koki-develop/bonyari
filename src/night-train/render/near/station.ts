@@ -1,9 +1,8 @@
 import { hex, mix, type RGB } from "../../core/color.ts";
-import { clamp01, intervalCoverage, pulseCoverage, smoothstep } from "../../core/math.ts";
+import { clamp01, intervalCoverage, pulseCoverage } from "../../core/math.ts";
 import { hash3, Rng } from "../../core/random.ts";
 import type { Surface } from "../../core/surface.ts";
 import type { Station } from "../../sim/route.ts";
-import type { Train } from "../../sim/train.ts";
 import { EYE_ABOVE_RAIL, type Camera } from "../camera.ts";
 import type { Painter } from "../painter.ts";
 import { vendingMachine } from "../scenery/facade.ts";
@@ -12,7 +11,7 @@ import type { Shade } from "../shade.ts";
 export const PLATFORM_EDGE = 1.65;
 export const PLATFORM_HEIGHT = 1.1;
 export const PLATFORM_BACK = 7.6;
-const CANOPY_HEIGHT = 4.3;
+export const CANOPY_HEIGHT = 4.3;
 const CANOPY_BACK = 7.2;
 const PILLAR_LATERAL = 5.2;
 const PILLAR_SPACING = 12;
@@ -21,6 +20,59 @@ const CANOPY: RGB = [196, 194, 186];
 const SURFACE: RGB = [176, 172, 164];
 const TACTILE: RGB = [226, 186, 42];
 const STATION_COLORS: readonly RGB[] = ["#2e7d5b", "#2f63a8", "#b44a3a", "#6a5a9a"].map(hex);
+
+/** Rows of glyph-like strokes: text too small to read from a moving train. */
+function pseudoText(
+  p: Painter,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  ink: RGB,
+  seed: number,
+): void {
+  const a = Math.round(x0);
+  const b = Math.round(x1);
+  const top = Math.round(y0);
+  const bottom = Math.max(top + 1, Math.round(y1));
+  for (let x = a; x < b; x++) {
+    // Gaps between characters.
+    if ((x - a) % 4 === 3) {
+      continue;
+    }
+    for (let y = top; y < bottom; y++) {
+      if (hash3(seed, x - a, y - top) < 0.5) {
+        p.dot(x, y, ink);
+      }
+    }
+  }
+}
+
+/** Like `pseudoText`, in emissive LED dots. */
+function pseudoTextLit(
+  p: Painter,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  ink: RGB,
+  seed: number,
+): void {
+  const a = Math.round(x0);
+  const b = Math.round(x1);
+  const top = Math.round(y0);
+  const bottom = Math.max(top + 1, Math.round(y1));
+  for (let x = a; x < b; x++) {
+    if ((x - a) % 4 === 3) {
+      continue;
+    }
+    for (let y = top; y < bottom; y++) {
+      if (hash3(seed, x - a, y - top) < 0.55) {
+        p.lightDot(x, y, ink, 1);
+      }
+    }
+  }
+}
 
 /** Hour-of-day crowd factor for platforms. */
 function crowd(hour: number): number {
@@ -229,7 +281,16 @@ export type PlatformItemKind =
   | "bin"
   | "clock"
   | "person"
-  | "building";
+  | "sitter"
+  | "building"
+  | "stairs"
+  | "waitingRoom"
+  | "departureBoard"
+  | "hangingSign"
+  | "adBoard"
+  | "timetable"
+  | "extinguisher"
+  | "planter";
 
 export interface PlatformItem {
   kind: PlatformItemKind;
@@ -237,37 +298,110 @@ export interface PlatformItem {
   along: number;
   lateral: number;
   seed: number;
-  /** For people: whether they board our train when the doors open. */
-  boards: boolean;
-  /** For people: walking speed along the platform (m/s), 0 = standing. */
-  walk: number;
+  /** Along-track length (m) for structures that span a stretch of platform. */
+  length: number;
 }
 
-/** Furniture, the station building and people for a station. */
+/**
+ * Everything on a platform: stairs, a waiting room, signs and boards under the
+ * canopy, adverts on the fence, furniture and people. Larger stations get more.
+ */
 export function platformItems(station: Station, hour: number): PlatformItem[] {
   const r = new Rng(station.seed);
   const items: PlatformItem[] = [];
-  const add = (kind: PlatformItemKind, along: number, lateral: number, boards = false, walk = 0) =>
-    items.push({ kind, station, along, lateral, seed: r.int(0, 1 << 30), boards, walk });
-  const len = station.end - station.start;
-  add("building", station.start + len * r.range(0.3, 0.7), 16 + station.size * 6);
-  add("sign", station.stop + r.range(12, 25) * (r.chance(0.5) ? 1 : -1), 6.1);
-  for (let a = station.start + 14; a < station.end - 14; a += r.range(16, 30)) {
+  const add = (kind: PlatformItemKind, along: number, lateral: number, length = 0) =>
+    items.push({ kind, station, along, lateral, seed: r.int(0, 1 << 30), length });
+  const start = station.start + 10;
+  const end = station.end - 10;
+  const len = end - start;
+  const big = station.size > 0.5;
+  // Stretches already taken on the back half of the platform.
+  const taken: [number, number][] = [];
+  const free = (a: number, b: number) => taken.every(([x, y]) => b < x || a > y);
+  const take = (a: number, b: number) => taken.push([a, b]);
+
+  add(
+    "building",
+    station.start + (station.end - station.start) * r.range(0.3, 0.7),
+    16 + station.size * 6,
+  );
+
+  // Stairs down to the underpass (or up to the footbridge), with exit signs above.
+  const stairs = big ? 2 : 1;
+  for (let i = 0; i < stairs; i++) {
+    const at =
+      start +
+      len *
+        (stairs === 1 ? r.range(0.35, 0.65) : i === 0 ? r.range(0.15, 0.35) : r.range(0.65, 0.85));
+    const length = r.range(11, 14);
+    add("stairs", at, 5.0, length);
+    take(at - 2, at + length + 2);
+    add("hangingSign", at - 1.5, 3.9, 0);
+    if (big) {
+      add("departureBoard", at + length * 0.5, 3.3);
+    }
+  }
+  if (station.size > 0.2 && r.chance(big ? 0.9 : 0.5)) {
+    const length = r.range(4.5, 6.5);
+    for (let tries = 0; tries < 8; tries++) {
+      const at = r.range(start, end - length);
+      if (free(at - 1, at + length + 1)) {
+        add("waitingRoom", at, 6.0, length);
+        take(at - 1, at + length + 1);
+        break;
+      }
+    }
+  }
+  const sign = station.stop + r.range(12, 25) * (r.chance(0.5) ? 1 : -1);
+  add("sign", sign, 6.1);
+  take(sign - 2, sign + 2);
+
+  // Along the back of the platform: benches (often in pairs), vending machines,
+  // bins, planters and a timetable; adverts on the fence behind them.
+  for (let a = start; a < end - 2; a += r.range(4.5, 8)) {
+    if (!free(a - 1.2, a + 1.2)) {
+      continue;
+    }
     const roll = r.next();
-    if (roll < 0.45) {
+    if (roll < 0.34) {
       add("bench", a, 6.6);
-    } else if (roll < 0.62) {
+      if (r.chance(0.35 * crowd(hour) + 0.08)) {
+        add("sitter", a + r.range(-0.5, 0.5), 6.35);
+      }
+    } else if (roll < 0.46) {
       add("vending", a, 7.0);
-    } else if (roll < 0.8) {
+      if (r.chance(0.4)) {
+        add("vending", a + 1.15, 7.0);
+        a += 1.2;
+      }
+    } else if (roll < 0.58) {
       add("bin", a, 6.8);
+    } else if (roll < 0.66) {
+      add(station.size < 0.4 ? "planter" : "timetable", a, 6.9);
+    } else if (roll < 0.72 && station.size < 0.5) {
+      add("planter", a, 7.0);
+    }
+    take(a - 1.2, a + 1.2);
+  }
+  for (let a = start + 3; a < end - 3; a += r.range(9, 16)) {
+    if (r.chance(big ? 0.7 : 0.4)) {
+      add("adBoard", a, 7.55);
+    }
+  }
+  // Hanging signs under the canopy, and a fire extinguisher at some pillars.
+  for (let a = start + 12; a < end - 12; a += r.range(24, 40)) {
+    add("hangingSign", a, 3.9);
+  }
+  for (let pillar = station.start + 18; pillar < end - 6; pillar += 12) {
+    if (r.chance(0.3)) {
+      add("extinguisher", pillar + 0.4, 5.0);
     }
   }
   add("clock", station.stop + r.range(-30, 30), 3.4);
-  const people = Math.round((2 + station.size * 10) * crowd(hour) * r.range(0.6, 1.2));
+
+  const people = Math.round((3 + station.size * 14) * crowd(hour) * r.range(0.7, 1.2));
   for (let i = 0; i < people; i++) {
-    const boards = r.chance(0.45);
-    const walk = !boards && r.chance(0.25) ? r.range(-1.2, 1.2) : 0;
-    add("person", station.stop + r.range(-45, 45), r.range(3.2, 6.2), boards, walk);
+    add("person", station.stop + r.range(-45, 45), r.range(3.2, 6.2));
   }
   return items;
 }
@@ -291,73 +425,28 @@ const BINS: readonly RGB[] = [
   [200, 80, 60],
 ];
 
-/**
- * Where a person is now. Boarding passengers walk to the nearest door once
- * the doors open and are gone after we leave.
- */
-function personPosition(
-  item: PlatformItem,
-  train: Train,
-  time: number,
-): { along: number; lateral: number; visible: boolean; moving: boolean } {
-  const atThisStation =
-    train.station === item.station ||
-    (train.phase === "stopped" && Math.abs(train.pos - item.station.stop) < 1);
-  let along = item.along + item.walk * time;
-  // Walkers pace back and forth within the platform.
-  if (item.walk !== 0) {
-    const span = item.station.end - item.station.start - 30;
-    const u = (((along - item.station.start - 15) % (2 * span)) + 2 * span) % (2 * span);
-    along = item.station.start + 15 + (u < span ? u : 2 * span - u);
-  }
-  if (!item.boards) {
-    return { along, lateral: item.lateral, visible: true, moving: item.walk !== 0 };
-  }
-  const passed = train.pos > item.station.stop + 1 && !atThisStation;
-  if (passed) {
-    return { along, lateral: item.lateral, visible: false, moving: false };
-  }
-  if (train.phase === "stopped" && atThisStation && train.dwell > 2.5) {
-    // Head for the door of the car nearest to them (doors every 20 m, ours at +6 m).
-    const door = train.pos + 6 + Math.round((item.along - train.pos - 6) / 20) * 20;
-    const t = clamp01((train.dwell - 2.5 - hash3(item.seed, 1, 1) * 6) / 6);
-    const a = item.along + (door - item.along) * smoothstep(0, 0.6, t);
-    const lat = item.lateral + (PLATFORM_EDGE + 0.2 - item.lateral) * smoothstep(0.5, 1, t);
-    return { along: a, lateral: lat, visible: t < 1, moving: t > 0 && t < 1 };
-  }
-  return { along, lateral: item.lateral, visible: true, moving: false };
-}
-
-export function itemLateral(item: PlatformItem, train: Train, time: number): number {
-  return item.kind === "person" ? personPosition(item, train, time).lateral : item.lateral;
-}
-
-export function drawPlatformItem(p: Painter, item: PlatformItem, train: Train, time: number): void {
+export function drawPlatformItem(p: Painter, item: PlatformItem): void {
   const r = new Rng(item.seed);
   const lamps = p.light.lamps;
   switch (item.kind) {
     case "person": {
-      const pos = personPosition(item, train, time);
-      if (!pos.visible) {
-        return;
-      }
-      p.at(pos.lateral);
+      // People stand still where they wait.
+      p.at(item.lateral);
       const s = p.s;
-      const cx = p.x(pos.along);
+      const cx = p.x(item.along);
       const h = r.range(1.55, 1.8);
       const coat = r.pick(CLOTHES);
       const legs = r.pick(CLOTHES);
       const hair = r.pick(HAIR);
-      const floor = p.cam.yRail(pos.lateral, PLATFORM_HEIGHT);
+      const floor = p.cam.yRail(item.lateral, PLATFORM_HEIGHT);
       const w = Math.max(1, Math.round(0.42 * s));
-      const step = pos.moving ? Math.round(Math.sin(time * 7 + item.seed) * 0.12 * s) : 0;
-      const hip = p.cam.yRail(pos.lateral, PLATFORM_HEIGHT + h * 0.47);
-      const shoulder = p.cam.yRail(pos.lateral, PLATFORM_HEIGHT + h * 0.82);
-      const headTop = p.cam.yRail(pos.lateral, PLATFORM_HEIGHT + h);
+      const hip = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h * 0.47);
+      const shoulder = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h * 0.82);
+      const headTop = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
       const x0 = Math.round(cx - w / 2);
       // Legs.
-      p.rect(x0 + step, hip, x0 + Math.max(1, w / 2) + step, floor, legs);
-      p.rect(x0 + w / 2 - step, hip, x0 + w - step, floor, mix(legs, [0, 0, 0], 0.15));
+      p.rect(x0, hip, x0 + Math.max(1, w / 2), floor, legs);
+      p.rect(x0 + w / 2, hip, x0 + w, floor, mix(legs, [0, 0, 0], 0.15));
       // Coat.
       p.rect(
         x0 - (s > 6 ? 1 : 0),
@@ -376,7 +465,7 @@ export function drawPlatformItem(p: Painter, item: PlatformItem, train: Train, t
         headTop + Math.max(1, (shoulder - headTop) * 0.45),
         hair,
       );
-      if (lamps > 0.3 && r.chance(0.4) && !pos.moving) {
+      if (lamps > 0.3 && r.chance(0.4)) {
         // Looking at a phone.
         p.lightDot(cx + hw / 2, (shoulder + hip) / 2 - 1, [200, 225, 255], 0.9);
       }
@@ -471,6 +560,264 @@ export function drawPlatformItem(p: Painter, item: PlatformItem, train: Train, t
               p.dot(x, y, [30, 34, 40]);
             }
           }
+        }
+      }
+      return;
+    }
+    case "sitter": {
+      p.at(item.lateral);
+      const s = p.s;
+      const cx = p.x(item.along);
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const coat = r.pick(CLOTHES);
+      const legs = r.pick(CLOTHES);
+      const w = Math.max(1, Math.round(0.42 * s));
+      const x0 = Math.round(cx - w / 2);
+      // Lower legs, thighs on the seat, torso, head.
+      p.rect(x0 + w * 0.2, Y(0.45), x0 + w * 0.8, Y(0), legs);
+      p.rect(x0, Y(0.55), x0 + w + Math.round(0.15 * s), Y(0.42), legs);
+      p.rect(x0, Y(1.1), x0 + w, Y(0.5), coat);
+      const hw = Math.max(1, Math.round(0.2 * s));
+      p.rect(cx - hw / 2, Y(1.35), cx + hw / 2, Y(1.1), SKIN);
+      p.rect(cx - hw / 2, Y(1.35), cx + hw / 2, Y(1.26), r.pick(HAIR));
+      if (lamps > 0.3 && r.chance(0.5)) {
+        p.lightDot(cx + hw, Y(0.75), [200, 225, 255], 0.9);
+      }
+      return;
+    }
+    case "stairs": {
+      // Glazed walls round the stairwell; the cover steps down with the stairs.
+      p.at(item.lateral);
+      const lat = item.lateral;
+      const view = p.view;
+      const footprint = p.cam.footprint(lat);
+      const glass: RGB = [186, 198, 206];
+      for (let x = 0; x < view.width; x++) {
+        const along = p.cam.alongAt(x, lat);
+        const cov = intervalCoverage(along, item.along, item.along + item.length, footprint);
+        if (cov <= 0) {
+          continue;
+        }
+        const t = (along - item.along) / item.length;
+        const top = p.cam.yRail(lat, PLATFORM_HEIGHT + 2.6 - 1.4 * Math.max(0, t - 0.15));
+        const floor = p.cam.yRail(lat, PLATFORM_HEIGHT);
+        const mullion = pulseCoverage(along - item.along, 1.4, 0.08, footprint);
+        for (
+          let y = Math.max(0, Math.floor(top));
+          y < Math.min(view.height, Math.ceil(floor));
+          y++
+        ) {
+          const h = p.cam.railHeightAt(y, lat) - PLATFORM_HEIGHT;
+          let c: RGB = h < 0.2 ? [130, 132, 134] : h > 1.0 && h < 1.08 ? [150, 154, 158] : glass;
+          if (y === Math.floor(top)) {
+            c = [92, 96, 102];
+          }
+          const k = mullion > 0.3 ? 0.7 : 1;
+          const sh = p.shade;
+          view.blend(
+            x,
+            y,
+            sh.litR(c[0] * k),
+            sh.litG(c[1] * k),
+            sh.litB(c[2] * k),
+            cov * (c === glass ? 0.8 : 1),
+          );
+          if (lamps > 0.2 && c === glass) {
+            view.add(x, y, 22 * lamps * cov, 24 * lamps * cov, 26 * lamps * cov);
+          }
+        }
+      }
+      return;
+    }
+    case "waitingRoom": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along);
+      const x1 = p.x(item.along + item.length);
+      const frame: RGB = [120, 126, 132];
+      if (lamps > 0.15) {
+        p.lightRect(x0, Y(2.4), x1, Y(0.1), [255, 236, 200], 0.45 * lamps);
+      } else {
+        p.rectAlpha(x0, Y(2.4), x1, Y(0.1), [170, 190, 204], 0.35);
+      }
+      // A bench inside and someone waiting.
+      p.rect(x0 + s * 0.4, Y(0.48), x1 - s * 0.4, Y(0.42), [110, 90, 70]);
+      if (r.chance(0.5)) {
+        const px = x0 + (x1 - x0) * r.range(0.25, 0.75);
+        p.rect(px - 0.2 * s, Y(1.1), px + 0.2 * s, Y(0.45), r.pick(CLOTHES));
+        p.rect(px - 0.1 * s, Y(1.33), px + 0.1 * s, Y(1.1), SKIN);
+      }
+      // Frame, roof slab and a sliding door in the middle.
+      for (
+        let a = item.along;
+        a <= item.along + item.length + 0.01;
+        a += item.length / Math.max(2, Math.round(item.length / 1.4))
+      ) {
+        p.rect(p.x(a), Y(2.4), p.x(a) + 1, Y(0), frame);
+      }
+      p.rect(x0 - 0.15 * s, Y(2.6), x1 + 0.15 * s, Y(2.4), [150, 150, 146]);
+      p.rect(x0, Y(0.1), x1, Y(0), frame);
+      const dm = (x0 + x1) / 2;
+      p.rect(dm - 0.45 * s, Y(2.1), dm + 0.45 * s, Y(2.1) + 1, frame);
+      p.rect(dm + 0.3 * s, Y(1.1), dm + 0.36 * s, Y(0.95), [210, 210, 206]);
+      // Its name plate.
+      p.rect(dm - 0.5 * s, Y(2.38), dm + 0.5 * s, Y(2.2), [244, 244, 238]);
+      pseudoText(p, dm - 0.4 * s, Y(2.35), dm + 0.4 * s, Y(2.23), [40, 44, 52], item.seed);
+      return;
+    }
+    case "departureBoard": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along - 1.2);
+      const x1 = p.x(item.along + 1.2);
+      // Hangers up to the canopy.
+      p.rect(x0 + 0.2 * s, Y(3.2), x0 + 0.2 * s + 1, Y(2.95), [110, 110, 114]);
+      p.rect(x1 - 0.2 * s, Y(3.2), x1 - 0.2 * s + 1, Y(2.95), [110, 110, 114]);
+      p.rect(x0, Y(2.98), x1, Y(2.42), [52, 54, 58]);
+      p.rect(x0 + 1, Y(2.92), x1 - 1, Y(2.48), [8, 8, 10]);
+      // Two rows of amber, green and white LED text: departures.
+      const rowH = (Y(2.48) - Y(2.92)) / 2;
+      for (let row = 0; row < 2; row++) {
+        const y0 = Y(2.92) + row * rowH + 1;
+        const y1 = y0 + Math.max(1, rowH - 1);
+        const cols: RGB[] = [
+          [255, 160, 50],
+          [120, 255, 140],
+          [245, 245, 240],
+        ];
+        const w = x1 - x0 - 2;
+        let x = x0 + 1;
+        for (let seg = 0; seg < 3; seg++) {
+          const segW = w * [0.25, 0.3, 0.45][seg];
+          pseudoTextLit(p, x + 1, y0, x + segW - 1, y1, cols[seg], item.seed + row * 7 + seg);
+          x += segW;
+        }
+      }
+      return;
+    }
+    case "hangingSign": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const exit = hash3(item.seed, 1, 1) < 0.5;
+      const x0 = p.x(item.along - 0.8);
+      const x1 = p.x(item.along + 0.8);
+      p.rect(x0 + 0.15 * s, Y(3.2), x0 + 0.15 * s + 1, Y(2.95), [110, 110, 114]);
+      p.rect(x1 - 0.15 * s, Y(3.2), x1 - 0.15 * s + 1, Y(2.95), [110, 110, 114]);
+      const bg: RGB = exit ? [240, 200, 40] : [246, 246, 242];
+      const ink: RGB = exit ? [30, 30, 30] : [40, 70, 130];
+      p.rect(x0, Y(2.98), x1, Y(2.58), bg);
+      if (lamps > 0.15) {
+        p.lightRect(x0, Y(2.98), x1, Y(2.58), bg, 0.6 * lamps);
+      }
+      // An arrow and a word or two.
+      const ay = (Y(2.98) + Y(2.58)) / 2;
+      const ax = x0 + 0.15 * s;
+      const ah = Math.max(1, Math.round(0.1 * s));
+      p.rect(ax, ay - ah / 2, ax + 0.3 * s, ay + ah / 2, ink);
+      p.rect(ax - 1, ay - ah, ax, ay + ah, ink);
+      pseudoText(p, ax + 0.45 * s, Y(2.92), x1 - 0.12 * s, Y(2.64), ink, item.seed);
+      return;
+    }
+    case "adBoard": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along - 1);
+      const x1 = p.x(item.along + 1);
+      const top = Y(1.55);
+      const bottom = Y(0.45);
+      p.rect(x0 - 1, top - 1, x1 + 1, bottom + 1, [96, 98, 102]);
+      // A poster: a color field, a big shape and some lines of copy.
+      const palette: RGB[] = [
+        [232, 90, 70],
+        [60, 120, 200],
+        [250, 214, 80],
+        [80, 170, 120],
+        [240, 240, 236],
+        [40, 44, 60],
+      ];
+      const bg = palette[Math.floor(hash3(item.seed, 2, 2) * palette.length)];
+      const fg = palette[Math.floor(hash3(item.seed, 3, 3) * palette.length)];
+      p.rect(x0, top, x1, bottom, bg);
+      const cx = x0 + (x1 - x0) * (0.3 + 0.4 * hash3(item.seed, 4, 4));
+      const cy = top + (bottom - top) * 0.4;
+      const rad = Math.max(1, (bottom - top) * 0.28);
+      for (let y = Math.floor(cy - rad); y <= Math.ceil(cy + rad); y++) {
+        for (let x = Math.floor(cx - rad); x <= Math.ceil(cx + rad); x++) {
+          if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= rad) {
+            p.dot(x, y, fg);
+          }
+        }
+      }
+      pseudoText(
+        p,
+        x0 + 0.15 * s,
+        bottom - (bottom - top) * 0.28,
+        x1 - 0.15 * s,
+        bottom - 2,
+        fg === bg ? [30, 30, 30] : fg,
+        item.seed,
+      );
+      if (lamps > 0.15) {
+        // Backlit.
+        p.lightRect(x0, top, x1, bottom, [255, 255, 250], 0.25 * lamps);
+      }
+      return;
+    }
+    case "timetable": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along - 0.5);
+      const x1 = p.x(item.along + 0.5);
+      p.rect(p.x(item.along) - 0.5, Y(0.6), p.x(item.along) + 0.5, Y(0), [110, 110, 114]);
+      p.rect(x0, Y(1.95), x1, Y(0.6), [246, 246, 242]);
+      p.rect(x0, Y(1.95), x1, Y(1.8), stationColor(item.station));
+      for (let y = Math.round(Y(1.72)); y < Y(0.7); y += Math.max(2, Math.round(0.12 * s))) {
+        for (let x = Math.round(x0 + 1); x < x1 - 1; x++) {
+          if (hash3(item.seed, x, y) < 0.45) {
+            p.dot(x, y, [60, 64, 72]);
+          }
+        }
+      }
+      return;
+    }
+    case "extinguisher": {
+      p.at(item.lateral);
+      const s = p.s;
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along - 0.18);
+      const x1 = p.x(item.along + 0.18);
+      p.rect(x0, Y(0.95), x1, Y(0.25), [206, 46, 40]);
+      p.rect(x0 + 1, Y(0.85), x1 - 1, Y(0.75), [246, 246, 240]);
+      if (s > 8) {
+        p.rect(x0, Y(0.95), x1, Y(0.95) + 1, [150, 30, 26]);
+      }
+      return;
+    }
+    case "planter": {
+      p.at(item.lateral);
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const x0 = p.x(item.along - 0.45);
+      const x1 = p.x(item.along + 0.45);
+      p.rect(x0, Y(0.45), x1, Y(0), [168, 110, 80]);
+      const season = p.world.season;
+      const flower: RGB =
+        season.warmth > 0.3
+          ? r.pick<RGB>([
+              [230, 80, 90],
+              [250, 210, 70],
+              [240, 240, 240],
+              [180, 110, 210],
+            ])
+          : [120, 140, 90];
+      for (let x = Math.round(x0); x < x1; x++) {
+        const hgt = 0.25 + hash3(item.seed, x, 1) * 0.3;
+        for (let y = Math.round(Y(0.45 + hgt)); y < Y(0.45); y++) {
+          p.dot(x, y, hash3(item.seed, x, y) < 0.3 ? flower : mix(season.grass, [40, 90, 40], 0.4));
         }
       }
       return;

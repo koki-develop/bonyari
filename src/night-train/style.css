@@ -127,29 +127,6 @@ body {
   display: inline;
 }
 
-.hint {
-  position: fixed;
-  left: 50%;
-  bottom: max(16px, env(safe-area-inset-bottom));
-  width: max-content;
-  max-width: calc(100vw - 32px);
-  margin: 0;
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: var(--panel);
-  font-size: 13px;
-  line-height: 1.6;
-  text-align: center;
-  opacity: 0;
-  transform: translateX(-50%);
-  transition: opacity 1.5s ease;
-  pointer-events: none;
-}
-
-.hint.shown {
-  opacity: 1;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .start-board {
     animation: none;

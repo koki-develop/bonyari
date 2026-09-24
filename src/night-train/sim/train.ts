@@ -60,6 +60,8 @@ export class Train {
   dwell = 0;
   doorsOpen = false;
   station: Station | null = null;
+  /** Stations stopped at so far. */
+  stationsVisited = 0;
   /** Events fired during the last update. */
   readonly events: TrainEventType[] = [];
   private cruise: number;
@@ -112,6 +114,7 @@ export class Train {
         this.speed = 0;
         this.phase = "stopped";
         this.dwell = 0;
+        this.stationsVisited++;
         this.events.push("arrive");
       }
     } else {

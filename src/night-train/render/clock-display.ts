@@ -1,95 +1,72 @@
 import { pack } from "../core/color.ts";
 import type { Surface } from "../core/surface.ts";
-import type { Rect } from "./layout.ts";
 
 type Glyph = readonly string[];
 
 const DIGITS: Record<string, Glyph> = {
-  "0": [".##.", "#..#", "#..#", "#..#", "#..#", "#..#", ".##."],
-  "1": ["..#.", ".##.", "..#.", "..#.", "..#.", "..#.", ".###"],
-  "2": [".##.", "#..#", "...#", "..#.", ".#..", "#...", "####"],
-  "3": [".##.", "#..#", "...#", "..#.", "...#", "#..#", ".##."],
-  "4": ["..#.", ".##.", "#.#.", "#.#.", "####", "..#.", "..#."],
-  "5": ["####", "#...", "###.", "...#", "...#", "#..#", ".##."],
-  "6": [".##.", "#...", "#...", "###.", "#..#", "#..#", ".##."],
-  "7": ["####", "...#", "..#.", "..#.", ".#..", ".#..", ".#.."],
-  "8": [".##.", "#..#", "#..#", ".##.", "#..#", "#..#", ".##."],
-  "9": [".##.", "#..#", "#..#", ".###", "...#", "...#", ".##."],
-  ":": [".", ".", "#", ".", "#", ".", "."],
+  "0": ["###", "#.#", "#.#", "#.#", "###"],
+  "1": [".#.", "##.", ".#.", ".#.", "###"],
+  "2": ["###", "..#", "###", "#..", "###"],
+  "3": ["###", "..#", ".##", "..#", "###"],
+  "4": ["#.#", "#.#", "###", "..#", "..#"],
+  "5": ["###", "#..", "###", "..#", "###"],
+  "6": ["###", "#..", "###", "#.#", "###"],
+  "7": ["###", "..#", ".#.", ".#.", ".#."],
+  "8": ["###", "#.#", "###", "#.#", "###"],
+  "9": ["###", "#.#", "###", "..#", "###"],
+  ":": [".", "#", ".", "#", "."],
 };
 
-/** Season marks: cherry blossom, sun, maple leaf, snowflake. */
-const SEASON_ICONS: readonly Glyph[] = [
-  ["..#.#..", ".##.##.", "#.###.#", ".##.##.", "#.###.#", ".##.##.", "..#.#.."],
-  ["#..#..#", ".#...#.", "..###..", "#.###.#", "..###..", ".#...#.", "#..#..#"],
-  ["...#...", "#.###.#", ".#####.", "#######", ".#####.", "..###..", "...#..."],
-  ["...#...", ".#.#.#.", "..###..", "#######", "..###..", ".#.#.#.", "...#..."],
-];
-
-const LIT = [255, 156, 48] as const;
-const UNLIT = [44, 20, 10] as const;
-const PANEL = [14, 9, 7] as const;
-const BEZEL = [52, 50, 54] as const;
+/** Width (px) of the table clock's body. */
+export const TABLE_CLOCK_WIDTH = 21;
+/** Height (px) of the table clock's body. */
+const TABLE_CLOCK_HEIGHT = 9;
 
 /**
- * The dot-matrix clock above the window: season mark and in-world time in
- * amber LEDs, with a soft bloom.
+ * A small travel clock standing on the table: dark casing, amber LED digits
+ * that glow softly after dark. `light` lights the casing.
  */
-export function drawClock(
+export function drawTableClock(
   screen: Surface,
-  rect: Rect,
+  x: number,
+  base: number,
   time: string,
-  seasonIndex: number,
   seconds: number,
-  lamp: number,
+  light: (r: number, g: number, b: number) => number,
 ): void {
-  const { x, y, w, h } = rect;
-  // Bezel (lit by the car light) and panel.
-  const b = 0.35 + 0.65 * lamp;
-  screen.fillRect(x - 1, y - 1, w + 2, h + 2, pack(BEZEL[0] * b, BEZEL[1] * b, BEZEL[2] * b));
-  screen.fillRect(x, y, w, h, pack(PANEL[0], PANEL[1], PANEL[2]));
-  const glyphs: Glyph[] = [SEASON_ICONS[seasonIndex % SEASON_ICONS.length]];
-  for (const ch of time) {
-    glyphs.push(DIGITS[ch] ?? DIGITS["0"]);
+  const w = TABLE_CLOCK_WIDTH;
+  const h = TABLE_CLOCK_HEIGHT;
+  const top = base - h;
+  // Casing with rounded top corners and a lighter top edge.
+  for (let y = top; y < base; y++) {
+    for (let xx = x; xx < x + w; xx++) {
+      if (y === top && (xx === x || xx === x + w - 1)) {
+        continue;
+      }
+      const k = y === top ? 1.5 : xx === x ? 1.2 : 1;
+      screen.set(xx, y, light(46 * k, 44 * k, 48 * k));
+    }
   }
-  const lit = new Set<number>();
-  const matrixX0 = x + 1;
-  const matrixY0 = y + 2;
+  // Feet and a contact shadow.
+  screen.set(x + 2, base, light(30, 30, 32));
+  screen.set(x + w - 3, base, light(30, 30, 32));
+  screen.blendRect(x, base, w, 1, [0, 0, 0], 0.3);
+  // Screen and digits.
+  screen.fillRect(x + 1, top + 1, w - 2, h - 2, pack(10, 8, 8));
+  // A muted amber that reads clearly without drawing the eye.
+  const pulse = 0.97 + 0.03 * Math.sin(seconds * 2);
+  const color = pack(178 * pulse, 98 * pulse, 44 * pulse);
   let cx = x + 2;
-  glyphs.forEach((g, gi) => {
+  for (const ch of time) {
+    const g = DIGITS[ch] ?? DIGITS["0"];
     for (let row = 0; row < g.length; row++) {
       for (let col = 0; col < g[row].length; col++) {
         if (g[row][col] === "#") {
-          lit.add((matrixY0 + row) * screen.width + cx + col);
+          screen.set(cx + col, top + 2 + row, color);
         }
       }
     }
-    cx += g[0].length + (gi === 0 ? 2 : 1);
-  });
-  // Unlit LED grid behind the characters.
-  for (let yy = matrixY0; yy < matrixY0 + 7; yy++) {
-    for (let xx = matrixX0; xx < x + w - 1; xx++) {
-      screen.set(xx, yy, pack(UNLIT[0], UNLIT[1], UNLIT[2]));
-    }
+    cx += g[0].length + 1;
   }
-  const pulse = 0.96 + 0.04 * Math.sin(seconds * 2.1);
-  for (const i of lit) {
-    const px = i % screen.width;
-    const py = Math.floor(i / screen.width);
-    screen.set(px, py, pack(LIT[0] * pulse, LIT[1] * pulse, LIT[2] * pulse));
-  }
-  for (const i of lit) {
-    const px = i % screen.width;
-    const py = Math.floor(i / screen.width);
-    for (const [dx, dy] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      if (!lit.has((py + dy) * screen.width + px + dx)) {
-        screen.add(px + dx, py + dy, 38, 16, 4);
-      }
-    }
-  }
+  screen.glow(x + w / 2, top + h / 2, w * 0.5, [200, 100, 40], 0.03);
 }

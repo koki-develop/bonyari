@@ -38,7 +38,7 @@ export interface GlassConditions {
 
 /**
  * The window pane: raindrops and snowflakes on the outside, condensation on
- * the inside that a finger can draw in.
+ * the inside.
  */
 export class Glass {
   private width = 0;
@@ -89,57 +89,6 @@ export class Glass {
     }
     this.drops.length = 0;
     this.flakes.length = 0;
-  }
-
-  /** Fogs the pane around a point, as when breathing on it. */
-  breathe(cx: number, cy: number, amount: number): void {
-    const radius = Math.max(7, this.height * 0.13);
-    const r2 = radius * radius;
-    for (
-      let y = Math.max(0, Math.floor(cy - radius * 1.6));
-      y < Math.min(this.height, Math.ceil(cy + radius * 1.6));
-      y++
-    ) {
-      for (
-        let x = Math.max(0, Math.floor(cx - radius * 1.6));
-        x < Math.min(this.width, Math.ceil(cx + radius * 1.6));
-        x++
-      ) {
-        const d2 = (x - cx) ** 2 + ((y - cy) * 1.2) ** 2;
-        const n = noise2(x / 4, y / 4, this.seed ^ 0xb4) * 0.5 + 0.75;
-        const i = y * this.width + x;
-        this.fog[i] = Math.min(1, this.fog[i] + amount * Math.exp(-d2 / r2) * n);
-      }
-    }
-    this.fogMax = Math.max(this.fogMax, amount);
-  }
-
-  /** Wipes a finger-wide line through the condensation. */
-  wipe(x0: number, y0: number, x1: number, y1: number): void {
-    const radius = Math.max(1.3, this.height / 70);
-    const len = Math.hypot(x1 - x0, y1 - y0);
-    const steps = Math.max(1, Math.ceil(len * 2));
-    for (let k = 0; k <= steps; k++) {
-      const t = k / steps;
-      const cx = x0 + (x1 - x0) * t;
-      const cy = y0 + (y1 - y0) * t;
-      for (
-        let y = Math.max(0, Math.floor(cy - radius - 1));
-        y < Math.min(this.height, Math.ceil(cy + radius + 1));
-        y++
-      ) {
-        for (
-          let x = Math.max(0, Math.floor(cx - radius - 1));
-          x < Math.min(this.width, Math.ceil(cx + radius + 1));
-          x++
-        ) {
-          const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
-          const keep = smoothstep(radius * 0.55, radius * 1.15, d);
-          const i = y * this.width + x;
-          this.fog[i] *= keep;
-        }
-      }
-    }
   }
 
   update(dt: number, c: GlassConditions): void {
@@ -299,7 +248,7 @@ export class Glass {
     }
   }
 
-  private computeBlur(view: Surface, jolt: number): void {
+  private computeBlur(view: Surface, jolt: number, sway: number): void {
     const w = this.width;
     const h = this.height;
     const radius = 2;
@@ -312,7 +261,7 @@ export class Glass {
         let g = 0;
         let b = 0;
         for (let k = -radius; k <= radius; k++) {
-          const c = view.get(x + k, y - jolt);
+          const c = view.get(x + k - sway, y - jolt);
           r += c & 255;
           g += (c >>> 8) & 255;
           b += (c >>> 16) & 255;
@@ -344,14 +293,22 @@ export class Glass {
   /**
    * Draws the view through the glass into `screen` at `rect`.
    * @param jolt vertical shake of the view (pixels)
+   * @param sway sideways shift of the view as the car sways (pixels)
    * @param fogTint light scattered by the condensation (interior and outside light)
    */
-  composite(screen: Surface, view: Surface, rect: Rect, jolt: number, fogTint: RGB): void {
+  composite(
+    screen: Surface,
+    view: Surface,
+    rect: Rect,
+    jolt: number,
+    sway: number,
+    fogTint: RGB,
+  ): void {
     const w = this.width;
     const h = this.height;
     const hasFog = this.fogMax > 0.01;
     if (hasFog) {
-      this.computeBlur(view, jolt);
+      this.computeBlur(view, jolt, sway);
     }
     const fog = this.fog;
     const out = screen.data;
@@ -368,7 +325,8 @@ export class Glass {
           continue;
         }
         const i = y * w + x;
-        const c = view.data[vy * w + x];
+        const vx = x - sway < 0 ? 0 : x - sway >= w ? w - 1 : x - sway;
+        const c = view.data[vy * w + vx];
         let r = c & 255;
         let g = (c >>> 8) & 255;
         let b = (c >>> 16) & 255;

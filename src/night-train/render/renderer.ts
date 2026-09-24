@@ -1,32 +1,34 @@
-import type { RGB } from "../core/color.ts";
-import { bump, clamp01 } from "../core/math.ts";
+import { mix, type RGB } from "../core/color.ts";
+import { bump, clamp01, smoothstep } from "../core/math.ts";
 import { Surface } from "../core/surface.ts";
-import { formatClock, SEASONS } from "../sim/clock.ts";
+import { formatClock } from "../sim/clock.ts";
 import { crossingActive } from "../sim/crossing.ts";
 import { type Crossing, makeTerrainScratch, type Station } from "../sim/route.ts";
 import type { Shell } from "../sim/spectacle.ts";
-import { type Car, LANE_OFFSET, type OncomingTrain } from "../sim/traffic.ts";
+import { type Car, LANE_OFFSET, ONCOMING_CAR_LENGTH, type OncomingTrain } from "../sim/traffic.ts";
 import type { World } from "../sim/world.ts";
 import { Camera, EYE_ABOVE_RAIL } from "./camera.ts";
 import { drawShell } from "./fireworks.ts";
 import { Glass } from "./glass.ts";
 import { GroundRenderer } from "./ground.ts";
-import { Interior } from "./interior.ts";
+import { Interior, type NearLight, type SunPatch } from "./interior.ts";
 import { computeLayout, type Layout } from "./layout.ts";
 import { computeLighting, type Lighting } from "./lighting.ts";
-import { drawCrossing, drawWaitingCar } from "./near/crossing.ts";
+import { crossingLampPhase, drawCrossing, drawWaitingCar } from "./near/crossing.ts";
 import {
+  CANOPY_HEIGHT,
   drawPillars,
   drawPlatform,
   drawPlatformBack,
   drawPlatformItem,
-  itemLateral,
   PLATFORM_BACK,
   type PlatformItem,
   platformItems,
 } from "./near/station.ts";
 import {
   BARRIER_LATERAL,
+  TUNNEL_LAMP_HEIGHT,
+  TUNNEL_LAMP_SPACING,
   drawBarrier,
   drawPolesAndWires,
   drawRailing,
@@ -125,6 +127,11 @@ export class Renderer {
   private frameDt = 1 / 60;
   /** Average color of the view in the last frame. */
   outside: RGB = [0, 0, 0];
+  /** Nearby light sources thrown into the car, reused every frame. */
+  private readonly nearLights: NearLight[] = [];
+  /** Sideways sway of the car, -1..1, and the heading it is computed from. */
+  private sway = 0;
+  private lastHeading = Number.NaN;
 
   constructor(display: HTMLCanvasElement, world: World) {
     this.display = display;
@@ -235,17 +242,26 @@ export class Renderer {
       222 * lampTint * 0.95 + this.outside[1] * 0.3,
       178 * lampTint * 0.95 + this.outside[2] * 0.3,
     ];
-    this.glass.composite(this.screen, view, this.layout.window, joltPx, fogTint);
+    this.updateSway(world, dt);
+    const swayPx = Math.abs(this.sway) > 0.6 ? Math.sign(this.sway) : 0;
+    this.glass.composite(this.screen, view, this.layout.window, joltPx, swayPx, fogTint);
 
     this.interior.render(this.screen, {
+      dt,
+      seconds: time,
       lampOn: options.lampOn,
       outside: this.outside,
+      lights: this.collectNearLights(world, light, time),
+      sun: this.sunPatch(world, light, shelter),
       jolt: joltPx,
+      sway: this.sway,
       traction: train.traction,
       time: formatClock(world.clock.minuteOfDay),
-      seasonIndex: SEASONS.indexOf(world.clock.season),
-      seconds: time,
       sillSnow: this.glass.sillSnow,
+      condensation,
+      stationsVisited: train.stationsVisited,
+      warmth: season.warmth,
+      hour,
     });
 
     this.artCtx.putImageData(this.image, 0, 0);
@@ -258,6 +274,145 @@ export class Renderer {
       this.layout.width * this.layout.scale,
       this.layout.height * this.layout.scale,
     );
+  }
+
+  /**
+   * The car leans into curves and rocks gently on the track; the view shifts
+   * by at most a pixel either way.
+   */
+  private updateSway(world: World, dt: number): void {
+    const heading = this.cam.heading;
+    const rate = Number.isNaN(this.lastHeading) || dt <= 0 ? 0 : (heading - this.lastHeading) / dt;
+    this.lastHeading = heading;
+    const train = world.train;
+    const speed = train.speed / 25;
+    const curve = clamp01(Math.abs(rate) * 60) * Math.sign(rate) * speed;
+    const rock = (0.35 * Math.sin(train.pos * 0.19) + 0.2 * Math.sin(train.pos * 0.053)) * speed;
+    const target = Math.max(-1, Math.min(1, curve + rock));
+    this.sway += (target - this.sway) * Math.min(1, dt * 1.5);
+  }
+
+  /**
+   * Light sources close enough outside to light up the car: tunnel lamps,
+   * platform lights, a passing train's windows, crossing lamps. Farther lights
+   * (houses, street lamps across the fields) are too weak to matter.
+   */
+  private collectNearLights(world: World, light: Lighting, time: number): NearLight[] {
+    const out = this.nearLights;
+    out.length = 0;
+    const cam = this.cam;
+    const route = world.route;
+    const win = this.layout.window;
+    const lamps = light.lamps;
+    // Daylight drowns out artificial light.
+    const dim = 1 - 0.85 * light.daylight;
+    const margin = win.w * 0.25;
+    const add = (along: number, lateral: number, height: number, c: RGB, power: number) => {
+      const x = cam.x(along, lateral);
+      if (x < -margin || x > win.w + margin) {
+        return;
+      }
+      // Inverse-square falloff, normalized to a source right beside the train.
+      const k = (power * dim) / (lateral / 2.5) ** 2;
+      out.push({
+        x: win.x + x,
+        y: win.y + cam.yRail(lateral, height),
+        r: (c[0] / 255) * k,
+        g: (c[1] / 255) * k,
+        b: (c[2] / 255) * k,
+      });
+    };
+    const [a0, a1] = cam.alongRange(8, margin + 10);
+    for (const t of route.tunnelsIn(a0, a1)) {
+      const from = Math.max(t.start, a0);
+      const to = Math.min(t.end, a1);
+      for (
+        let a = Math.ceil(from / TUNNEL_LAMP_SPACING) * TUNNEL_LAMP_SPACING;
+        a < to;
+        a += TUNNEL_LAMP_SPACING
+      ) {
+        add(a, TUNNEL_LATERAL, TUNNEL_LAMP_HEIGHT, [255, 168, 80], 0.9);
+      }
+    }
+    for (const st of route.stationsIn(a0 - 10, a1 + 10)) {
+      for (let a = Math.ceil((st.start + 8) / 5) * 5; a < st.end - 8; a += 5) {
+        for (const lateral of [3.1, 5.7]) {
+          add(a + 0.6, lateral, CANOPY_HEIGHT, [230, 240, 255], 0.14 * (0.35 + 0.65 * lamps));
+        }
+      }
+    }
+    if (lamps > 0.1) {
+      for (const tr of world.traffic.trains) {
+        if (tr.freight) {
+          continue;
+        }
+        for (let k = 0; k < tr.cars; k++) {
+          add(
+            tr.front - (k + 0.5) * ONCOMING_CAR_LENGTH,
+            ONCOMING_LATERAL,
+            2.2,
+            [255, 244, 214],
+            0.5 * lamps,
+          );
+        }
+      }
+    }
+    const twin = this.table.at(this.table.doubleTrack, world.train.pos) > 0.5;
+    for (const c of route.crossingsIn(a0 - 20, a1 + 20)) {
+      if (!crossingActive(c, world.train.pos)) {
+        continue;
+      }
+      const lateral = twin ? 6.8 : 3.3;
+      const side = crossingLampPhase(time) === 0 ? -1 : 1;
+      add(c.at - 3.8 + side * 0.36, lateral, 2.85, [255, 50, 36], 0.4);
+      add(c.at + 3.8 + side * 0.36, lateral, 2.85, [255, 50, 36], 0.4);
+      if (c.waitingCar && lamps > 0.1) {
+        add(c.at - 1.5, 9.5, 0.7, [255, 250, 230], 0.6 * lamps);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Sunlight streaming in through the window when the sun is low in front of
+   * us and nothing outside is in its way.
+   */
+  private sunPatch(world: World, light: Lighting, shelter: number): SunPatch | null {
+    const alt = world.sky.sunAltitude;
+    const sun = this.cam.toCamera(world.sky.sun);
+    if (alt <= 0 || alt > 34 || sun.forward < 0.1 || shelter > 0.5) {
+      return null;
+    }
+    let clear = 1;
+    const p = this.cam.projectDirection(world.sky.sun);
+    const view = this.view;
+    if (p && p.y >= 0 && p.x >= 0 && p.x < view.width && p.y < view.height) {
+      // Is the sun itself visible, or behind trees and buildings?
+      let lum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const c = view.get(p.x + dx, p.y + dy);
+          lum += ((c & 255) + ((c >>> 8) & 255) + ((c >>> 16) & 255)) / 765;
+        }
+      }
+      clear = clamp01((lum / 9 - 0.55) / 0.3);
+    }
+    const w = world.weather.state;
+    const intensity =
+      smoothstep(0, 3, alt) *
+      (1 - smoothstep(20, 34, alt)) *
+      (1 - w.cloudCover * 0.95) *
+      clear *
+      (1 - shelter);
+    if (intensity < 0.02) {
+      return null;
+    }
+    return {
+      intensity,
+      color: mix(light.sunGlow, light.sunDisc, 0.4),
+      slope: Math.max(-1.5, Math.min(1.5, sun.right / sun.forward)),
+      depth: clamp01(1 - alt / 22) * 0.8,
+    };
   }
 
   /** How much of the view is inside a tunnel (sheltered from rain and snow). */
@@ -330,7 +485,7 @@ export class Renderer {
         this.stationItems.set(st, items);
       }
       for (const item of items) {
-        out.push({ lateral: itemLateral(item, train, world.time), kind: "platformItem", item });
+        out.push({ lateral: item.lateral, kind: "platformItem", item });
       }
     }
     for (const st of this.stationItems.keys()) {
@@ -420,7 +575,7 @@ export class Renderer {
         return;
       case "platformItem": {
         p.shade = this.stationShade;
-        drawPlatformItem(p, d.item, world.train, world.time);
+        drawPlatformItem(p, d.item);
         p.shade = this.shade;
         return;
       }
