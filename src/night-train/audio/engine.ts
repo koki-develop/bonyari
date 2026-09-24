@@ -69,6 +69,8 @@ export class AudioEngine {
   /** Number of car boundaries of each passing train that have gone by. */
   private readonly oncomingPassed = new Map<OncomingTrain, number>();
   private readonly terrain = makeTerrainScratch();
+  /** The call each species made last, so it doesn't repeat straight away. */
+  private readonly lastCall = new Map<readonly AudioBuffer[], number>();
   private wasInTunnel = false;
   private nextCreak = 20;
 
@@ -695,82 +697,84 @@ export class AudioEngine {
     // Autumn insects fall silent in rain and wind.
     const insects = (1 - smoothstep(0.1, 0.4, w.rain)) * noSnow * calm;
     const chance = (rate: number) => r.chance(rate * dt * (1 - tunnel));
+    const call = (
+      calls: readonly AudioBuffer[],
+      rate: number,
+      gain: readonly [number, number],
+      pitch: readonly [number, number] = [0.97, 1.03],
+    ) => {
+      if (chance(rate)) {
+        this.play(
+          this.fresh(calls),
+          now,
+          r.range(gain[0], gain[1]),
+          this.outsideBus,
+          r.range(-0.9, 0.9),
+          r.range(pitch[0], pitch[1]),
+        );
+      }
+    };
+    const calls = bank.wildlife;
+    const f = season.yearFraction;
+    const terrain = world.route.terrain(world.train.pos, this.terrain);
     const morning = bump(hour, 7, 4, 1.5);
-    // Spring mornings: the bush warbler.
-    if (
-      chance(0.09 * birds * cyclicBump(season.yearFraction, 0.12, 0.2, 0.05, 1) * morning * rural)
-    ) {
-      this.play(bank.uguisu, now, r.range(0.04, 0.09), this.outsideBus, r.range(-0.8, 0.8));
-    }
-    if (
-      chance(
-        0.35 *
-          birds *
-          (0.4 + 0.6 * season.warmth) *
-          day *
-          (0.3 + world.route.terrain(world.train.pos, this.terrain).houses) *
-          (1 - season.cicadas * 0.5),
-      )
-    ) {
-      this.play(
-        r.pick(bank.sparrows),
-        now,
-        r.range(0.02, 0.05),
-        this.outsideBus,
-        r.range(-0.9, 0.9),
-        r.range(0.95, 1.1),
-      );
-    }
-    if (chance(0.12 * cicadas * season.cicadas * day * rural)) {
-      this.play(
-        bank.minmin,
-        now,
-        r.range(0.03, 0.06),
-        this.outsideBus,
-        r.range(-0.8, 0.8),
-        r.range(0.97, 1.03),
-      );
-    }
+    const dawnDusk = bump(hour, 6, 1.5, 0.8) + bump(hour, 17.4, 1.6, 0.8);
+    // Spring mornings in the country: the bush warbler.
+    call(
+      calls.uguisu,
+      0.09 * birds * cyclicBump(f, 0.12, 0.2, 0.05, 1) * morning * rural,
+      [0.04, 0.09],
+    );
+    // Great tits through spring and early summer.
+    call(
+      calls.shijukara,
+      0.07 * birds * cyclicBump(f, 0.2, 0.18, 0.06, 1) * morning * (0.4 + 0.6 * rural),
+      [0.02, 0.05],
+    );
+    // Bulbuls all year, loudest in the morning.
+    call(calls.hiyodori, 0.06 * birds * (0.3 + 0.7 * morning) * day, [0.02, 0.05]);
+    // Sparrows around the houses through the day.
+    call(
+      calls.sparrow,
+      0.35 *
+        birds *
+        (0.4 + 0.6 * season.warmth) *
+        day *
+        (0.3 + terrain.houses) *
+        (1 - season.cicadas * 0.5),
+      [0.02, 0.05],
+      [0.95, 1.1],
+    );
+    // Crows at dawn and dusk, often some way off.
+    call(calls.crow, 0.05 * birds * dawnDusk, [0.015, 0.045], [0.94, 1.06]);
+    // Cicadas: robust cicadas by day, evening cicadas at dusk and dawn, and
+    // the "tsuku-tsuku-booshi" as summer ends.
+    const lateSummer = cyclicBump(f, 0.5, 0.05, 0.03, 1);
+    call(
+      calls.minmin,
+      0.12 * cicadas * season.cicadas * (1 - lateSummer * 0.6) * day * rural,
+      [0.03, 0.06],
+    );
+    call(calls.tsukutsukuboshi, 0.06 * cicadas * lateSummer * day * rural, [0.03, 0.06]);
     const dusk = bump(hour, 18.2, 1.2, 0.6) + bump(hour, 5, 0.8, 0.5);
-    if (chance(0.15 * cicadas * season.cicadas * dusk * rural)) {
-      this.play(
-        bank.higurashi,
-        now,
-        r.range(0.03, 0.06),
-        this.outsideBus,
-        r.range(-0.8, 0.8),
-        r.range(0.97, 1.03),
-      );
+    call(calls.higurashi, 0.15 * cicadas * season.cicadas * dusk * rural, [0.03, 0.06]);
+    call(calls.frog, 7 * frogs * season.frogs * night * terrain.fields, [0.01, 0.04], [0.85, 1.2]);
+    // Autumn insects: bell crickets, field crickets and pine crickets.
+    const insectRate = 3 * insects * season.crickets * night * rural;
+    call(calls.suzumushi, insectRate * 0.5, [0.01, 0.035]);
+    call(calls.korogi, insectRate * 0.35, [0.01, 0.035]);
+    call(calls.matsumushi, insectRate * 0.15, [0.01, 0.03]);
+  }
+
+  /** A call from `calls`, never the same one twice in a row. */
+  private fresh(calls: readonly AudioBuffer[]): AudioBuffer {
+    const last = this.lastCall.get(calls);
+    let i = this.rng.int(0, calls.length - (last === undefined ? 1 : 2));
+    if (last !== undefined && i >= last) {
+      i++;
     }
-    if (
-      chance(
-        7 *
-          frogs *
-          season.frogs *
-          night *
-          world.route.terrain(world.train.pos, this.terrain).fields,
-      )
-    ) {
-      this.play(
-        r.pick(bank.frogs),
-        now,
-        r.range(0.01, 0.04),
-        this.outsideBus,
-        r.range(-1, 1),
-        r.range(0.85, 1.2),
-      );
-    }
-    if (chance(3 * insects * season.crickets * night * rural)) {
-      const bell = r.chance(0.6);
-      this.play(
-        bell ? r.pick(bank.suzumushi) : bank.korogi,
-        now,
-        r.range(0.01, 0.035),
-        this.outsideBus,
-        r.range(-1, 1),
-        r.range(0.97, 1.03),
-      );
-    }
+    this.lastCall.set(calls, i);
+    return calls[i];
   }
 
   private fireworks(world: World, now: number): void {

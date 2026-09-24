@@ -1,5 +1,14 @@
 import { Rng } from "../core/random.ts";
-import { chain, envelope, filter, noiseBuffer, noiseBurst, renderOffline } from "./synth.ts";
+import {
+  type Build,
+  chain,
+  envelope,
+  filter,
+  noiseBuffer,
+  noiseBurst,
+  renderOffline,
+} from "./synth.ts";
+import * as calls from "./wildlife.ts";
 
 /** Every one-shot sound, synthesized once when the ride starts. */
 export interface SoundBank {
@@ -18,18 +27,26 @@ export interface SoundBank {
   dropTicks: AudioBuffer[];
   click: AudioBuffer;
   pressure: AudioBuffer;
-  uguisu: AudioBuffer;
-  sparrows: AudioBuffer[];
-  suzumushi: AudioBuffer[];
-  korogi: AudioBuffer;
-  frogs: AudioBuffer[];
-  minmin: AudioBuffer;
-  higurashi: AudioBuffer;
+  /** Several distinct calls of each species. */
+  wildlife: Wildlife;
   creaks: AudioBuffer[];
   noise: { white: AudioBuffer; pink: AudioBuffer; brown: AudioBuffer };
 }
 
-type Build = (ctx: OfflineAudioContext, noise: AudioBuffer, rng: Rng) => void;
+export interface Wildlife {
+  uguisu: AudioBuffer[];
+  sparrow: AudioBuffer[];
+  hiyodori: AudioBuffer[];
+  shijukara: AudioBuffer[];
+  crow: AudioBuffer[];
+  frog: AudioBuffer[];
+  suzumushi: AudioBuffer[];
+  korogi: AudioBuffer[];
+  matsumushi: AudioBuffer[];
+  minmin: AudioBuffer[];
+  higurashi: AudioBuffer[];
+  tsukutsukuboshi: AudioBuffer[];
+}
 
 function tone(
   ctx: BaseAudioContext,
@@ -354,165 +371,6 @@ const pressure: Build = (ctx, noise, r) => {
   );
 };
 
-/** Japanese bush warbler: "hoo — hokekyo". */
-const uguisu: Build = (ctx) => {
-  const out = ctx.createGain();
-  out.connect(ctx.destination);
-  const whistle = (start: number, points: readonly (readonly [number, number])[], amp: number) => {
-    const o = ctx.createOscillator();
-    o.type = "sine";
-    o.frequency.setValueAtTime(points[0][1], start);
-    for (const [t, f] of points.slice(1)) {
-      o.frequency.linearRampToValueAtTime(f, start + t);
-    }
-    const end = start + points[points.length - 1][0];
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, start);
-    g.gain.linearRampToValueAtTime(amp, start + 0.05);
-    g.gain.setValueAtTime(amp, end - 0.06);
-    g.gain.linearRampToValueAtTime(0, end);
-    o.start(start);
-    o.stop(end + 0.05);
-    chain(o, g, out);
-  };
-  whistle(
-    0,
-    [
-      [0, 1180],
-      [0.9, 1260],
-      [1.0, 1240],
-    ],
-    0.45,
-  );
-  whistle(
-    1.12,
-    [
-      [0, 2350],
-      [0.09, 1900],
-    ],
-    0.4,
-  );
-  whistle(
-    1.24,
-    [
-      [0, 2150],
-      [0.1, 1750],
-    ],
-    0.4,
-  );
-  whistle(
-    1.4,
-    [
-      [0, 2900],
-      [0.18, 2500],
-      [0.45, 2350],
-    ],
-    0.45,
-  );
-};
-
-const sparrow =
-  (variant: number): Build =>
-  (ctx) => {
-    const n = 2 + variant;
-    for (let i = 0; i < n; i++) {
-      const start = i * (0.09 + variant * 0.02);
-      const o = ctx.createOscillator();
-      o.frequency.setValueAtTime(4600 - variant * 300, start);
-      o.frequency.exponentialRampToValueAtTime(3100, start + 0.05);
-      o.start(start);
-      o.stop(start + 0.07);
-      chain(o, envelope(ctx, start, 0.004, 0.05, 0.4), ctx.destination);
-    }
-  };
-
-const suzumushi =
-  (freq: number): Build =>
-  (ctx) => {
-    const o = tone(ctx, "sine", freq, 0, 0.8);
-    const trem = ctx.createGain();
-    trem.gain.value = 0.5;
-    const lfo = tone(ctx, "square", 38, 0, 0.8);
-    const depth = ctx.createGain();
-    depth.gain.value = 0.5;
-    chain(lfo, depth, trem.gain);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, 0);
-    g.gain.linearRampToValueAtTime(0.35, 0.05);
-    g.gain.setValueAtTime(0.35, 0.45);
-    g.gain.linearRampToValueAtTime(0, 0.7);
-    chain(o, trem, g, ctx.destination);
-  };
-
-const korogi: Build = (ctx) => {
-  for (let i = 0; i < 10; i++) {
-    const t = i * 0.042;
-    const o = tone(ctx, "sine", 4700, t, t + 0.03);
-    chain(o, envelope(ctx, t, 0.002, 0.02, 0.3), ctx.destination);
-  }
-};
-
-const frog =
-  (variant: number): Build =>
-  (ctx, noise, r) => {
-    const pulses = 2 + variant;
-    for (let i = 0; i < pulses; i++) {
-      const t = i * 0.075;
-      const src = noiseBurst(ctx, noise, t, 0.06, r.next());
-      const g = envelope(ctx, t, 0.004, 0.035, 0.8);
-      const f1 = filter(ctx, "bandpass", 620 + variant * 60, 5);
-      const f2 = filter(ctx, "bandpass", 1500 + variant * 120, 6);
-      chain(src, g);
-      g.connect(f1);
-      g.connect(f2);
-      f1.connect(ctx.destination);
-      f2.connect(ctx.destination);
-    }
-  };
-
-/** Robust cicada: "miin min min min ... mii". */
-const minmin: Build = (ctx, noise, r) => {
-  const out = ctx.createGain();
-  out.connect(ctx.destination);
-  const syllables = 9;
-  let t = 0;
-  for (let i = 0; i < syllables; i++) {
-    const long = i === 0 || i === syllables - 1;
-    const dur = long ? 0.7 : 0.26;
-    const o = tone(ctx, "sawtooth", 3500, t, t + dur + 0.05);
-    o.frequency.setValueAtTime(3300, t);
-    o.frequency.linearRampToValueAtTime(3900, t + dur * 0.3);
-    o.frequency.linearRampToValueAtTime(3600, t + dur);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(0.18, t + dur * 0.3);
-    g.gain.linearRampToValueAtTime(0, t + dur);
-    chain(o, filter(ctx, "bandpass", 3800, 3), g, out);
-    chain(
-      noiseBurst(ctx, noise, t, dur, r.next()),
-      filter(ctx, "bandpass", 4200, 4),
-      envelope(ctx, t, dur * 0.3, dur, 0.15),
-      out,
-    );
-    t += dur + 0.04;
-  }
-};
-
-/** Evening cicada: a falling "kana-kana-kana". */
-const higurashi: Build = (ctx) => {
-  const out = ctx.createGain();
-  out.connect(ctx.destination);
-  const count = 16;
-  for (let i = 0; i < count; i++) {
-    const t = i * 0.13;
-    const f = 5300 - i * 50;
-    const o = tone(ctx, "sine", f, t, t + 0.12);
-    o.frequency.linearRampToValueAtTime(f - 500, t + 0.1);
-    const amp = 0.3 * Math.sin((Math.PI * (i + 1)) / (count + 1));
-    chain(o, envelope(ctx, t, 0.01, 0.09, amp), out);
-  }
-};
-
 const creak =
   (variant: number): Build =>
   (ctx, noise, r) => {
@@ -552,14 +410,8 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     ticks,
     clk,
     press,
-    warbler,
-    sparrows,
-    bells,
-    cricket,
-    frogs,
-    cicada,
-    evening,
     creaks,
+    wildlife,
   ] = await Promise.all([
     Promise.all([0, 1, 2, 3].map((v) => render(0.5, joint(v, false)))),
     Promise.all([0, 1, 2].map((v) => render(1.0, joint(v, true)))),
@@ -576,14 +428,8 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     Promise.all([0, 1, 2, 3].map((v) => render(0.06, dropTick(v)))),
     render(0.12, click),
     render(1.1, pressure),
-    render(2.0, uguisu),
-    Promise.all([0, 1, 2].map((v) => render(0.5, sparrow(v)))),
-    Promise.all([4150, 4480].map((f) => render(0.8, suzumushi(f)))),
-    render(0.5, korogi),
-    Promise.all([0, 1, 2].map((v) => render(0.4, frog(v)))),
-    render(4.5, minmin),
-    render(2.3, higurashi),
     Promise.all([0, 1].map((v) => render(0.6, creak(v)))),
+    renderWildlife(render),
   ]);
   return {
     joints,
@@ -601,14 +447,56 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     dropTicks: ticks,
     click: clk,
     pressure: press,
-    uguisu: warbler,
-    sparrows,
-    suzumushi: bells,
-    korogi: cricket,
-    frogs,
-    minmin: cicada,
-    higurashi: evening,
     creaks,
+    wildlife,
     noise: { white, pink, brown },
+  };
+}
+
+async function renderWildlife(
+  render: (seconds: number, build: Build) => Promise<AudioBuffer>,
+): Promise<Wildlife> {
+  const many = (count: number, seconds: number, build: Build) =>
+    Promise.all(Array.from({ length: count }, () => render(seconds, build)));
+  const [
+    uguisu,
+    sparrow,
+    hiyodori,
+    shijukara,
+    crow,
+    frog,
+    suzumushi,
+    korogi,
+    matsumushi,
+    minmin,
+    higurashi,
+    tsukutsukuboshi,
+  ] = await Promise.all([
+    Promise.all([0, 0, 1, 1, 2, 3].map((v) => render(3.2, calls.uguisu(v)))),
+    many(6, 1.8, calls.sparrow),
+    many(4, 3.8, calls.hiyodori),
+    many(4, 2.8, calls.shijukara),
+    many(4, 4, calls.crow),
+    many(8, 1.5, calls.frog),
+    many(5, 2.8, calls.suzumushi),
+    many(5, 3.2, calls.korogi),
+    many(3, 2.6, calls.matsumushi),
+    many(4, 5.2, calls.minmin),
+    many(4, 3.2, calls.higurashi),
+    many(3, 6.2, calls.tsukutsukuboshi),
+  ]);
+  return {
+    uguisu,
+    sparrow,
+    hiyodori,
+    shijukara,
+    crow,
+    frog,
+    suzumushi,
+    korogi,
+    matsumushi,
+    minmin,
+    higurashi,
+    tsukutsukuboshi,
   };
 }

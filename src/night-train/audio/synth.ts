@@ -1,5 +1,8 @@
 import { Rng } from "../core/random.ts";
 
+/** Builds a one-shot sound into an offline context, drawing its variation from `rng`. */
+export type Build = (ctx: OfflineAudioContext, noise: AudioBuffer, rng: Rng) => void;
+
 export type NoiseColor = "white" | "pink" | "brown";
 
 /** A looping mono noise buffer. */
