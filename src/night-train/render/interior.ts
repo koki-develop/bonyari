@@ -577,7 +577,7 @@ export class Interior {
     }
     const light = this.lightFor(f);
     const base = table.y + Math.max(2, Math.round(table.h * 0.55)) - Math.round(f.jolt);
-    // Everything sits together in one spot, the way you'd leave it within reach.
+    // Everything sits together toward the left, the way you'd leave it within reach.
     const widths: Record<TableItem, number> = {
       mikan: 9,
       frozenMikan: 9,
@@ -591,15 +591,7 @@ export class Interior {
       Math.round(Math.max(13, Math.round(this.layout.height * 0.085)) * 0.36),
     );
     const gap = 4;
-    const total =
-      TABLE_CLOCK_WIDTH +
-      gap +
-      TICKET_WIDTH +
-      gap +
-      this.items.reduce((sum, it) => sum + widths[it] + gap, 0) +
-      bottleW;
-    const center = win.x + win.w * (this.layout.portrait ? 0.5 : 0.62);
-    let x = Math.round(center - total / 2);
+    let x = win.x + this.layout.curtain + gap;
     drawTableClock(screen, x, base, f.time, f.seconds, light);
     x += TABLE_CLOCK_WIDTH + gap;
     this.renderTicket(screen, x, base, light);
