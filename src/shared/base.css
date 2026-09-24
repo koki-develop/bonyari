@@ -1,0 +1,35 @@
+:root {
+  --bg: #05070d;
+  --ink: #e9e4d6;
+  --ink-dim: #a39e92;
+  --accent: #ffb454;
+  --panel: rgb(8 10 20 / 62%);
+  --font: "DotGothic16", ui-monospace, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+[hidden] {
+  display: none !important;
+}

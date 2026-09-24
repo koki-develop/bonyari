@@ -1,12 +1,35 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05070d" />
+    <meta name="description" content="疲れたときに、ぼーっと眺める小さな作品集。" />
     <title>spaceout</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/shared/base.css" />
+    <link rel="stylesheet" href="/src/top/style.css" />
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <main class="collection">
+      <header class="collection-header">
+        <h1>spaceout</h1>
+        <p>疲れたときに、ぼーっと眺める小さな作品集。</p>
+      </header>
+      <ul class="works">
+        <li>
+          <a class="work" href="night-train/">
+            <img class="work-thumb" src="thumbs/night-train.png" alt="" width="320" height="180" />
+            <span class="work-title">夜行列車</span>
+            <span class="work-desc">夜行列車の車窓。季節と時間が、ゆっくり流れていきます。</span>
+          </a>
+        </li>
+      </ul>
+    </main>
   </body>
 </html>

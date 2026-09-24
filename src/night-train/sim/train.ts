@@ -1,0 +1,167 @@
+import { approach, clamp, mod } from "../core/math.ts";
+import { makeTerrainScratch, RAIL_LENGTH, type Route, type Station } from "./route.ts";
+
+/** Comfortable service acceleration and braking (m/s²). */
+const ACCEL = 0.5;
+export const DECEL = 0.65;
+/** Gentle rate for changes of cruising speed. */
+const CRUISE_ACCEL = 0.25;
+/** Seconds spent at a station. */
+export const DWELL = 28;
+
+/**
+ * Axle positions (m) relative to our seat, front of the train first: the rear
+ * bogie of the car ahead, both bogies of our car, the front bogie of the car behind.
+ */
+export const AXLES: readonly { offset: number; gain: number }[] = [
+  { offset: 14.15, gain: 0.35 },
+  { offset: 12.05, gain: 0.4 },
+  { offset: 7.95, gain: 0.85 },
+  { offset: 5.85, gain: 1 },
+  { offset: -5.85, gain: 1 },
+  { offset: -7.95, gain: 0.85 },
+  { offset: -12.05, gain: 0.4 },
+  { offset: -14.15, gain: 0.35 },
+];
+
+export type TrainEventType =
+  | "brake"
+  | "arrive"
+  | "airRelease"
+  | "doorOpen"
+  | "melody"
+  | "doorChime"
+  | "doorClose"
+  | "depart";
+
+/** Seconds after arrival at which each dwell event fires. */
+const DWELL_TIMELINE: readonly (readonly [number, TrainEventType])[] = [
+  [0.7, "airRelease"],
+  [2.2, "doorOpen"],
+  [DWELL - 13, "melody"],
+  [DWELL - 4.2, "doorChime"],
+  [DWELL - 2.4, "doorClose"],
+  [DWELL, "depart"],
+];
+
+export type TrainPhase = "running" | "braking" | "stopped";
+
+export class Train {
+  private readonly route: Route;
+  private readonly terrain = makeTerrainScratch();
+  /** Along-track position (m) of our window. */
+  pos: number;
+  /** Speed (m/s). */
+  speed: number;
+  /** Signed acceleration normalized to the service rates; drives the motor sound. */
+  traction = 0;
+  phase: TrainPhase = "running";
+  /** Seconds since arrival while stopped. */
+  dwell = 0;
+  doorsOpen = false;
+  station: Station | null = null;
+  /** Events fired during the last update. */
+  readonly events: TrainEventType[] = [];
+  private cruise: number;
+
+  constructor(route: Route, pos: number) {
+    this.route = route;
+    this.pos = pos;
+    this.cruise = route.terrain(pos, this.terrain).cruise;
+    this.speed = this.cruise;
+  }
+
+  update(dt: number): void {
+    this.events.length = 0;
+    if (this.phase === "stopped") {
+      this.updateDwell(dt);
+      return;
+    }
+
+    const terrain = this.route.terrain(this.pos, this.terrain);
+    this.cruise = approach(this.cruise, terrain.cruise, 0.2, dt);
+    let target = this.cruise;
+    const next = this.route.nextStation(this.pos + 0.01);
+    if (next) {
+      const remaining = next.stop - this.pos;
+      const brakingSpeed = Math.sqrt(2 * DECEL * Math.max(0, remaining));
+      if (brakingSpeed < target) {
+        target = brakingSpeed;
+        if (this.phase === "running") {
+          this.phase = "braking";
+          this.station = next;
+          this.events.push("brake");
+        }
+      }
+    }
+
+    const prev = this.speed;
+    if (this.phase === "braking" && this.station) {
+      // Follow the braking curve exactly so the stop lands on the mark.
+      const remaining = Math.max(0, this.station.stop - this.pos);
+      // The speed that lands exactly on the curve after this step:
+      // v = sqrt(2a (remaining - v dt)).
+      const ad = DECEL * dt;
+      const onCurve = -ad + Math.sqrt(ad * ad + 2 * DECEL * remaining);
+      const v = Math.min(this.speed, onCurve);
+      const step = Math.min(v * dt, remaining);
+      this.pos += step;
+      this.speed = v;
+      if (remaining - step < 0.02 || v < 0.03) {
+        this.pos = this.station.stop;
+        this.speed = 0;
+        this.phase = "stopped";
+        this.dwell = 0;
+        this.events.push("arrive");
+      }
+    } else {
+      const rate = target > this.speed ? (this.speed < target - 3 ? ACCEL : CRUISE_ACCEL) : DECEL;
+      this.speed += clamp(target - this.speed, -rate * dt, rate * dt);
+      this.pos += this.speed * dt;
+      if (next) {
+        // Never run above the braking curve from where we now are.
+        this.speed = Math.min(this.speed, Math.sqrt(2 * DECEL * Math.max(0, next.stop - this.pos)));
+      }
+    }
+    const accel = dt > 0 ? (this.speed - prev) / dt : 0;
+    this.traction = approach(this.traction, accel >= 0 ? accel / ACCEL : accel / DECEL, 4, dt);
+  }
+
+  private updateDwell(dt: number): void {
+    const before = this.dwell;
+    this.dwell += dt;
+    this.traction = approach(this.traction, 0, 4, dt);
+    for (const [at, type] of DWELL_TIMELINE) {
+      if (before < at && this.dwell >= at) {
+        this.events.push(type);
+        if (type === "doorOpen") {
+          this.doorsOpen = true;
+        } else if (type === "doorClose") {
+          this.doorsOpen = false;
+        } else if (type === "depart") {
+          this.phase = "running";
+          this.station = null;
+        }
+      }
+    }
+  }
+
+  /**
+   * Vertical jolt 0..1 of the car body as the wheels under our seat cross a
+   * rail joint; used to shake the view and the things on the table.
+   */
+  jolt(jointed: number): number {
+    if (jointed < 0.5 || this.speed < 0.5) {
+      return 0;
+    }
+    const window = this.speed * 0.05;
+    let j = 0;
+    for (let i = 2; i < 6; i++) {
+      const d = mod(this.pos + AXLES[i].offset, RAIL_LENGTH);
+      if (d < window) {
+        j = Math.max(j, AXLES[i].gain * (1 - d / window));
+      }
+    }
+    return j * Math.min(1, this.speed / 15);
+  }
+}

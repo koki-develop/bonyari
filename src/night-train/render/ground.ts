@@ -1,0 +1,507 @@
+import { pack } from "../core/color.ts";
+import { clamp01, DEG, intervalCoverage, lerp, pulseCoverage, smoothstep } from "../core/math.ts";
+import { hash2, hash3 } from "../core/random.ts";
+import { bayer, type Surface } from "../core/surface.ts";
+import type { Bridge, Crossing } from "../sim/route.ts";
+import type { World } from "../sim/world.ts";
+import type { Camera } from "./camera.ts";
+import type { Lighting } from "./lighting.ts";
+import type { TerrainTable } from "./terrain-table.ts";
+
+const PLOT_ALONG = 34;
+const PLOT_LATERAL = 23;
+/** Lateral distance (m) beyond which the ground is only haze. */
+const MAX_GROUND = 40000;
+const STEP = 5;
+/** Center of the adjacent track and half its gauge (Japanese narrow gauge). */
+const NEXT_TRACK = 4;
+const HALF_GAUGE = 0.53;
+
+/** Grassy verge (m) between the embankment and the first fields. */
+const VERGE = 3;
+/** Size (m) of the patches that make up yards and lots. */
+const LOT = 7;
+/** Size (m) of the fine texture cells: small along, finer across. */
+const GRAIN_ALONG = 0.6;
+const GRAIN_LATERAL = 0.22;
+
+/** Mutable color accumulator to avoid allocations in the per-pixel loop. */
+interface Px {
+  r: number;
+  g: number;
+  b: number;
+}
+
+function set(p: Px, r: number, g: number, b: number): void {
+  p.r = r;
+  p.g = g;
+  p.b = b;
+}
+
+function blendInto(p: Px, r: number, g: number, b: number, a: number): void {
+  p.r += (r - p.r) * a;
+  p.g += (g - p.g) * a;
+  p.b += (b - p.b) * a;
+}
+
+/**
+ * Fine surface texture. Along the track it is box-filtered by the motion blur,
+ * so at speed it smears into streaks that still vary from row to row.
+ */
+function grain(p: Px, along: number, z: number, foot: number, rowFoot: number, seed: number): void {
+  const lateralDetail = 1 - smoothstep(0.12, 0.7, rowFoot);
+  if (lateralDetail <= 0) {
+    return;
+  }
+  const row = Math.floor(z / GRAIN_LATERAL);
+  const sharp = Math.min(1, Math.sqrt(GRAIN_ALONG / Math.max(GRAIN_ALONG, foot)));
+  const streak = hash3(row, seed, 41);
+  const speck = hash3(Math.floor(along / GRAIN_ALONG), row, seed + 42);
+  const k = (streak * (1 - sharp) + speck * sharp - 0.5) * 0.18 * lateralDetail;
+  p.r *= 1 + k;
+  p.g *= 1 + k;
+  p.b *= 1 + k;
+}
+
+/**
+ * The ground plane, rendered per pixel by casting each pixel's ray onto it:
+ * fields, roads, the adjacent track, rivers under bridges, beaches and the sea.
+ * Everything that repeats is box-filtered over the pixel footprint plus the
+ * distance traveled during the frame, which doubles as motion blur.
+ */
+export class GroundRenderer {
+  private readonly px: Px = { r: 0, g: 0, b: 0 };
+
+  render(
+    view: Surface,
+    cam: Camera,
+    world: World,
+    light: Lighting,
+    table: TerrainTable,
+    groundLimit: Float32Array,
+    time: number,
+  ): void {
+    const route = world.route;
+    const season = world.season;
+    const weather = world.weather.state;
+    const seed = world.seed;
+    const [a0, a1] = cam.alongRange(MAX_GROUND, 2);
+    const waters: Bridge[] = route.bridgesIn(a0, a1);
+    const [n0, n1] = cam.alongRange(400, 4);
+    const crossings: Crossing[] = route.crossingsIn(n0 - 10, n1 + 10);
+    const sunX = cam.projectDirection(world.sky.sun)?.x ?? -1e9;
+    const moonX = cam.projectDirection(world.sky.moon)?.x ?? -1e9;
+    const sunAlt = Math.max(0.5, world.sky.sunAltitude);
+    const moonAlt = Math.max(0.5, world.sky.moonAltitude);
+    const sunGlint = smoothstep(-2, 6, world.sky.sunAltitude) * (1 - weather.cloudCover * 0.85);
+    const moonGlint =
+      smoothstep(0, 10, world.sky.moonAltitude) *
+      world.sky.moonIllumination *
+      (1 - light.daylight) *
+      (1 - weather.cloudCover * 0.9);
+    const [ar, ag, ab] = light.ambient;
+    const [fr, fg, fb] = light.fog;
+    const vis = weather.visibility * 0.55;
+    const snow = weather.snowCover;
+    const wet = weather.wetness;
+    const flooded = season.paddyFlooded;
+    const canola = season.canola;
+    const pampas = season.pampas;
+    const [gr, gg, gb] = season.grass;
+    const [pr, pg, pb] = season.paddy;
+    const eye = cam.eye;
+    const F = cam.focal;
+    const W = view.width;
+    const data = view.data;
+    const p = this.px;
+    const firstRow = Math.max(0, Math.floor(cam.horizon));
+
+    for (let y = firstRow; y < view.height; y++) {
+      const ry = y + 0.5 - cam.horizon;
+      if (ry <= 0.05) {
+        continue;
+      }
+      const z = (eye * F) / ry;
+      const rowFoot = (z * z) / (eye * F);
+      const pixelAlong = z / F;
+      const foot = pixelAlong + Math.abs(cam.travel);
+      const fogK = 1 - Math.exp(-z / vis);
+      const detail = 1 - smoothstep(0.6, 3, pixelAlong);
+      // Reflections come from the mirrored row of the sky already drawn above.
+      const mirrorY = Math.max(0, Math.floor(2 * cam.horizon - y - 1));
+
+      for (let x = 0; x < W; x++) {
+        if (z > groundLimit[x]) {
+          continue;
+        }
+        const along = cam.pos + ((x + 0.5 - cam.cx) * z) / F;
+        let water = false;
+        let waterDist = z;
+        let paddy = false;
+
+        // Rivers under bridges: re-cast the ray onto the lower water surface.
+        let inRiver = false;
+        for (let i = 0; i < waters.length; i++) {
+          const wsp = waters[i].water;
+          if (along >= wsp.start - 60 && along < wsp.end + 60) {
+            const zw = ((eye + waters[i].depth) * F) / ry;
+            const aw = cam.pos + ((x + 0.5 - cam.cx) * zw) / F;
+            if (aw >= wsp.start && aw < wsp.end) {
+              water = true;
+              waterDist = zw;
+              inRiver = true;
+            } else if (along >= wsp.start && along < wsp.end) {
+              // The ray hits the steep bank between ground and water.
+              set(p, 104, 96, 74);
+              blendInto(p, gr, gg, gb, 0.45);
+              inRiver = true;
+            }
+            break;
+          }
+        }
+
+        if (!inRiver) {
+          const shore = table.sample(table.shore, along);
+          if (z > shore) {
+            water = true;
+          } else if (z < 2.3) {
+            // Our own ballast.
+            const n = hash3(Math.floor(along * 6), Math.floor(z * 6), 5) * 30;
+            set(p, 112 + n, 106 + n, 98 + n);
+          } else {
+            paddy = this.land(
+              p,
+              along,
+              z,
+              rowFoot,
+              foot,
+              detail,
+              table,
+              shore,
+              crossings,
+              seed,
+              gr,
+              gg,
+              gb,
+              pr,
+              pg,
+              pb,
+              flooded,
+              canola,
+              pampas,
+              time,
+            );
+            // A flooded paddy is mostly sky reflection with rows of seedlings.
+            water = paddy;
+            // Snow settles on everything but water; roads stay darker.
+            if (!water && snow > 0) {
+              // Soft drifts rather than per-pixel noise.
+              const keep =
+                1 - snow * (0.86 + 0.14 * hash2(Math.floor(along / 3), Math.floor(z / 2)));
+              p.r = lerp(236, p.r, keep);
+              p.g = lerp(240, p.g, keep);
+              p.b = lerp(248, p.b, keep);
+            }
+            if (!water && wet > 0) {
+              const k = 1 - wet * 0.22;
+              p.r *= k;
+              p.g *= k;
+              p.b *= k;
+            }
+          }
+        }
+
+        const i = y * W + x;
+        const d = bayer(x, y) - 0.5;
+        if (water) {
+          const wz = waterDist;
+          const sea = !paddy && !inRiver;
+          const ripple =
+            Math.sin(along * 0.9 + time * 1.7 + wz * 0.35) + Math.sin(along * 0.37 - time * 1.1);
+          const amp = Math.min(sea ? 3.5 : 2.5, (sea ? 90 : 60) / wz) * (paddy ? 0.3 : 1);
+          const rx = Math.max(0, Math.min(W - 1, Math.round(x + ripple * amp)));
+          const refl =
+            data[
+              Math.min(mirrorY + Math.round(Math.abs(ripple) * amp * 0.3), view.height - 1) * W + rx
+            ];
+          // Fresnel: water mirrors the sky at grazing angles and shows its own color up close.
+          const grazing = Math.exp(-ry / (F * 0.09));
+          const fres = clamp01((sea ? 0.18 : 0.42) + (sea ? 0.72 : 0.5) * grazing);
+          let r = (sea ? 22 : 30) * ar;
+          let g = (sea ? 58 : 52) * ag;
+          let b = (sea ? 78 : 64) * ab;
+          r += ((refl & 255) - r) * fres;
+          g += (((refl >>> 8) & 255) - g) * fres;
+          b += (((refl >>> 16) & 255) - b) * fres;
+          if (sea) {
+            // Swell lines parallel to the shore.
+            const swell =
+              Math.sin(wz * 0.8 + time * 1.3 + Math.sin(along * 0.04) * 2) * (1 - grazing);
+            r *= 1 + swell * 0.12;
+            g *= 1 + swell * 0.12;
+            b *= 1 + swell * 0.12;
+          }
+          if (paddy) {
+            // Seedlings poke through the flooded paddy.
+            const k = 0.25 + 0.2 * season.leafDensity;
+            r += (pr * ar - r) * k;
+            g += (pg * ag - g) * k;
+            b += (pb * ab - b) * k;
+          } else if (!inRiver) {
+            // Waves roll toward the beach; foam near the waterline.
+            const shore = table.sample(table.shore, along);
+            const fromShore = wz - shore;
+            const crest = pulseCoverage(
+              wz + time * 1.6 + Math.sin(along * 0.05) * 3,
+              11,
+              1.2,
+              rowFoot,
+            );
+            const foam =
+              crest * smoothstep(26, 2, fromShore) +
+              smoothstep(3, 0, fromShore) * (0.6 + 0.4 * Math.sin(time * 0.9 + along * 0.1));
+            const foamLight = 150 * (ar + 0.15);
+            r += (foamLight - r) * foam * 0.8;
+            g += (foamLight * 1.02 - g) * foam * 0.8;
+            b += (foamLight * 1.05 - b) * foam * 0.8;
+          }
+          // Glitter under the sun and moon.
+          const sparkle = hash3(x, y, Math.floor(time * 7));
+          const sd = Math.abs(x - sunX);
+          const md = Math.abs(x - moonX);
+          const spread = 2 + ry * 0.25;
+          // Glitter only where the water reflects the sun toward us: the row's
+          // depression below the horizon must match the sun's altitude.
+          const depression = Math.atan2(ry, F) / DEG;
+          const sunMatch = Math.exp(-(((depression - sunAlt) / 7) ** 2));
+          const moonMatch = Math.exp(-(((depression - moonAlt) / 7) ** 2));
+          if (
+            sunGlint > 0 &&
+            sd < spread * 3 &&
+            sparkle < sunGlint * sunMatch * 0.5 * (1 - sd / (spread * 3))
+          ) {
+            r += light.sunGlow[0] * 0.8;
+            g += light.sunGlow[1] * 0.8;
+            b += light.sunGlow[2] * 0.8;
+          } else if (
+            moonGlint > 0 &&
+            md < spread * 2 &&
+            sparkle < moonGlint * moonMatch * 0.45 * (1 - md / (spread * 2))
+          ) {
+            r += 170;
+            g += 175;
+            b += 180;
+          }
+          const f = 1 - Math.exp(-wz / vis);
+          data[i] = pack(
+            r + (fr - r) * f + d * STEP,
+            g + (fg - g) * f + d * STEP,
+            b + (fb - b) * f + d * STEP,
+          );
+        } else {
+          const k = 1 - fogK;
+          data[i] = pack(
+            p.r * ar * k + fr * fogK + d * STEP,
+            p.g * ag * k + fg * fogK + d * STEP,
+            p.b * ab * k + fb * fogK + d * STEP,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Writes the unlit land color into `p`. Returns true for a flooded paddy,
+   * which the caller renders as water instead.
+   */
+  private land(
+    p: Px,
+    along: number,
+    z: number,
+    rowFoot: number,
+    foot: number,
+    detail: number,
+    table: TerrainTable,
+    shore: number,
+    crossings: Crossing[],
+    seed: number,
+    gr: number,
+    gg: number,
+    gb: number,
+    pr: number,
+    pg: number,
+    pb: number,
+    flooded: number,
+    canola: number,
+    pampas: number,
+    time: number,
+  ): boolean {
+    // Adjacent track.
+    const twin = z < 6 ? table.at(table.doubleTrack, along) : 0;
+    if (twin > 0.5 && z < NEXT_TRACK + 1.6) {
+      const n = hash3(Math.floor(along * 5), Math.floor(z * 5), 9) * 26 * detail;
+      set(p, 108 + n, 102 + n, 96 + n);
+      if (z > NEXT_TRACK - 1.05 && z < NEXT_TRACK + 1.05) {
+        const sleeper = pulseCoverage(along, 0.62, 0.22, foot);
+        blendInto(p, 124, 118, 110, sleeper * 0.8);
+      }
+      const rail =
+        intervalCoverage(
+          z,
+          NEXT_TRACK - HALF_GAUGE - 0.04,
+          NEXT_TRACK - HALF_GAUGE + 0.04,
+          rowFoot,
+        ) +
+        intervalCoverage(
+          z,
+          NEXT_TRACK + HALF_GAUGE - 0.04,
+          NEXT_TRACK + HALF_GAUGE + 0.04,
+          rowFoot,
+        );
+      blendInto(p, 196, 196, 204, Math.min(1, rail));
+      return false;
+    }
+
+    const elevation = z < 30 ? table.at(table.elevation, along) : 0;
+    const embankment = 2.3 + (twin > 0.5 ? 3.4 : 0) + elevation * 1.4;
+    const road = table.sample(table.road, along);
+    const onRoad = Math.abs(z - road) < 3.6;
+    let crossing = false;
+    if (z < 420) {
+      for (let i = 0; i < crossings.length; i++) {
+        if (Math.abs(along - crossings[i].at) < 3.1) {
+          crossing = true;
+          break;
+        }
+      }
+    }
+
+    if (crossing || onRoad) {
+      // Asphalt, with a dashed center line along the parallel road.
+      set(p, 84, 84, 88);
+      if (onRoad && !crossing) {
+        const center =
+          intervalCoverage(z, road - 0.07, road + 0.07, rowFoot) *
+          pulseCoverage(along, 10, 5, foot);
+        const edge =
+          intervalCoverage(z, road - 3.1, road - 2.95, rowFoot) +
+          intervalCoverage(z, road + 2.95, road + 3.1, rowFoot);
+        blendInto(p, 220, 220, 214, Math.min(1, center + edge) * 0.9);
+      }
+      return false;
+    }
+
+    // The shore: sand where there is room for a beach, armour stones against a seawall.
+    if (shore < 1e8) {
+      const beach = 6 + 6 * table.sample(table.pines, along);
+      if (z > shore - beach) {
+        if (shore - embankment < 10) {
+          const stone = hash3(Math.floor(along / 1.2), Math.floor(z / 0.9), 23);
+          const v = 0.75 + stone * 0.4 * (0.4 + 0.6 * detail);
+          set(p, 150 * v, 148 * v, 140 * v);
+          const wetStone =
+            smoothstep(shore - 2.5, shore, z) * (0.6 + 0.4 * Math.sin(time * 0.9 + along * 0.1));
+          blendInto(p, 70, 72, 70, wetStone);
+        } else {
+          const n = hash3(Math.floor(along * 2), Math.floor(z * 2), 23) * 16 * detail;
+          set(p, 204 + n, 188 + n, 150 + n);
+          const wetSand = smoothstep(shore - 5, shore - 0.5, z);
+          blendInto(p, 150, 136, 108, wetSand * (0.7 + 0.3 * Math.sin(time * 0.9 + along * 0.1)));
+        }
+        grain(p, along, z, foot, rowFoot, seed);
+        return false;
+      }
+    }
+
+    if (z < embankment + VERGE) {
+      // Grassy embankment slope and verge, with seasonal flowers.
+      const slope = z < embankment ? 0.86 : 0.95;
+      set(p, gr * slope, gg * slope, gb * slope);
+      const h = hash3(Math.floor(along * 3), Math.floor(z * 3), 17);
+      const clump = detail * (h - 0.5) * 0.25;
+      p.r *= 1 + clump;
+      p.g *= 1 + clump;
+      p.b *= 1 + clump;
+      if (canola > 0 && h > 1 - canola * 0.35) {
+        blendInto(p, 236, 214, 60, detail * 0.9 + (1 - detail) * canola * 0.25);
+      } else if (pampas > 0 && h < pampas * 0.25) {
+        blendInto(p, 220, 206, 176, detail * 0.8 + (1 - detail) * pampas * 0.2);
+      }
+      grain(p, along, z, foot, rowFoot, seed);
+      return false;
+    }
+
+    const pa = Math.floor(along / PLOT_ALONG);
+    const pl = Math.floor(z / PLOT_LATERAL);
+    const use = hash3(pa, pl, seed);
+    const fields = table.at(table.fields, along);
+    const built = table.at(table.houses, along) * 0.8 + table.at(table.apartments, along);
+    const forest = table.at(table.forest, along);
+
+    if (use < fields) {
+      const crop = hash3(pa, pl, seed + 1);
+      const inAlong = along - pa * PLOT_ALONG;
+      const inLat = z - pl * PLOT_LATERAL;
+      // Raised paths (aze) between plots.
+      const path = Math.max(
+        intervalCoverage(inAlong, 0, 0.9, foot),
+        intervalCoverage(inLat, 0, 0.9, rowFoot),
+      );
+      if (crop < 0.68) {
+        if (flooded > 0.5 && path < 0.5) {
+          return true;
+        }
+        set(p, pr, pg, pb);
+        // Rows of rice, perpendicular to the track, visible up close.
+        const rows = pulseCoverage(inAlong, 0.3, 0.12, foot);
+        const k = (rows - 0.4) * 0.22 * detail;
+        p.r *= 1 + k;
+        p.g *= 1 + k;
+        p.b *= 1 + k;
+      } else if (crop < 0.84) {
+        // Vegetable ridges.
+        set(p, 118, 96, 70);
+        const rows = pulseCoverage(inAlong, 1.3, 0.6, foot);
+        blendInto(p, gr * 0.9, gg * 0.95, gb * 0.8, rows * 0.75);
+      } else if (canola > 0.2 && crop < 0.93) {
+        set(p, gr, gg, gb);
+        blendInto(p, 238, 214, 58, canola * 0.95);
+      } else {
+        set(p, gr * 0.95, gg * 0.92, gb * 0.85);
+      }
+      // Each plot is a slightly different shade.
+      const tone = 0.93 + hash3(pa, pl, seed + 5) * 0.14;
+      p.r *= tone;
+      p.g *= tone;
+      p.b *= tone;
+      blendInto(p, gr * 1.02, gg * 1.02, gb * 0.95, path);
+      grain(p, along, z, foot, rowFoot, seed);
+      return false;
+    }
+    if (use < fields + built) {
+      // Gardens, gravel, driveways and bare soil around houses.
+      const ca = Math.floor(along / LOT);
+      const cl = Math.floor(z / LOT);
+      const tone = hash3(ca, cl, seed + 2);
+      if (tone < 0.45) {
+        set(p, gr * 0.9, gg * 0.92, gb * 0.85);
+      } else if (tone < 0.7) {
+        set(p, 142, 134, 122);
+      } else if (tone < 0.85) {
+        set(p, 98, 98, 102);
+      } else {
+        set(p, 122, 102, 82);
+      }
+      grain(p, along, z, foot, rowFoot, seed);
+      return false;
+    }
+    if (use < fields + built + forest) {
+      set(p, gr * 0.52, gg * 0.58, gb * 0.5);
+      grain(p, along, z, foot, rowFoot, seed);
+      return false;
+    }
+    set(p, gr, gg, gb);
+    grain(p, along, z, foot, rowFoot, seed);
+    return false;
+  }
+}
