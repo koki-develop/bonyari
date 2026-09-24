@@ -41,10 +41,11 @@ import {
   TRUSS_LATERAL_SINGLE,
   TUNNEL_LATERAL,
 } from "./near/trackside.ts";
+import { drawTunnelHills } from "./near/tunnel-hill.ts";
 import { drawCar, drawOncoming, ONCOMING_LATERAL } from "./near/vehicles.ts";
 import { Painter } from "./painter.ts";
 import { Precipitation } from "./precipitation.ts";
-import { RidgeRenderer } from "./ridges.ts";
+import { RIDGE_LATERALS, RidgeRenderer } from "./ridges.ts";
 import {
   drawApartment,
   drawBarn,
@@ -69,6 +70,8 @@ import { TerrainTable } from "./terrain-table.ts";
 const TERRAIN = makeTerrainScratch();
 /** Half-length (m) over which the view heading blends between sections. */
 const HEADING_BLEND = 900;
+/** Along-track distance (m) within which a tunnel's hill can be in view. */
+const HILL_RANGE = 320;
 
 type Drawable =
   | { lateral: number; kind: "scenery"; item: Scenery }
@@ -77,6 +80,8 @@ type Drawable =
   | { lateral: number; kind: "poles" }
   | { lateral: number; kind: "barrier" }
   | { lateral: number; kind: "tunnels" }
+  | { lateral: number; kind: "hills" }
+  | { lateral: number; kind: "ridge"; index: number }
   | { lateral: number; kind: "bridge"; index: number }
   | { lateral: number; kind: "platformBack"; station: Station }
   | { lateral: number; kind: "platform"; station: Station }
@@ -206,7 +211,7 @@ export class Renderer {
 
     const view = this.view;
     this.sky.render(view, cam, world, light, time);
-    this.ridges.render(view, cam, world, light, this.shade);
+    this.ridges.prepare(view, cam, world);
     this.ground.render(view, cam, world, light, this.table, this.ridges.groundLimit, time);
     this.painter.begin(view, cam, this.shade, light, world, time);
     this.collectDrawables(world);
@@ -465,6 +470,15 @@ export class Renderer {
     if (route.tunnelsIn(n0 - 20, n1 + 20).length > 0) {
       out.push({ lateral: TUNNEL_LATERAL, kind: "tunnels" });
     }
+    RIDGE_LATERALS.forEach((lateral, index) => {
+      if (this.ridges.visible[index]) {
+        out.push({ lateral, kind: "ridge", index });
+      }
+    });
+    if (route.tunnelsIn(train.pos - HILL_RANGE, train.pos + HILL_RANGE).length > 0) {
+      // The hills over the tunnels lie behind everything standing in front of them.
+      out.push({ lateral: Number.MAX_VALUE, kind: "hills" });
+    }
     route.bridgesIn(n0 - 10, n1 + 10).forEach((_, index) => {
       out.push({
         lateral: twin ? TRUSS_LATERAL_DOUBLE : TRUSS_LATERAL_SINGLE,
@@ -519,7 +533,9 @@ export class Renderer {
     const view = this.view;
     switch (d.kind) {
       case "scenery":
+        p.base = d.item.base ?? 0;
         drawScenery(p, d.item);
+        p.base = 0;
         return;
       case "car":
         drawCar(p, d.car, d.lateral);
@@ -540,24 +556,25 @@ export class Renderer {
       case "barrier": {
         const [a, b] = cam.alongRange(BARRIER_LATERAL, 20);
         drawBarrier(
-          view,
-          cam,
-          this.shade,
+          this.painter,
           (along) => this.table.sample(this.table.barrier, along),
           world.route.stationsIn(a, b),
+          options.lampOn,
         );
         return;
       }
+      case "ridge":
+        this.ridges.draw(d.index, this.painter);
+        return;
+      case "hills":
+        drawTunnelHills(
+          this.painter,
+          world.route.tunnelsIn(world.train.pos - HILL_RANGE, world.train.pos + HILL_RANGE),
+        );
+        return;
       case "tunnels": {
         const [a, b] = cam.alongRange(TUNNEL_LATERAL, 40);
-        drawTunnel(
-          view,
-          cam,
-          this.shade,
-          light,
-          world.route.tunnelsIn(a - 20, b + 20),
-          options.lampOn,
-        );
+        drawTunnel(this.painter, world.route.tunnelsIn(a - 20, b + 20), options.lampOn);
         return;
       }
       case "bridge": {

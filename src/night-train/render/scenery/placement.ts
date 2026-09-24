@@ -1,7 +1,14 @@
-import { hash3, hashU32 } from "../../core/random.ts";
+import { hash3, hashU32, tileNoise } from "../../core/random.ts";
 import type { Bridge, Crossing, Span, Station } from "../../sim/route.ts";
 import type { World } from "../../sim/world.ts";
 import type { Camera } from "../camera.ts";
+import {
+  HILL_TREES_REACH,
+  hillEvergreen,
+  hillWooded,
+  insideTunnelHill,
+  tunnelHill,
+} from "../near/tunnel-hill.ts";
 import type { TerrainTable } from "../terrain-table.ts";
 
 export type SceneryKind =
@@ -35,6 +42,8 @@ export interface Scenery {
   seed: number;
   /** For poles and pylons: position of the next one the wires run to. */
   next?: { along: number; lateral: number };
+  /** Height (m) of the ground it stands on above the surrounding land, on hillsides. */
+  base?: number;
 }
 
 interface Band {
@@ -100,12 +109,38 @@ export function placeScenery(out: Scenery[], cam: Camera, world: World, table: T
         bambooGrove(along, lateral, table, seed) && h(5) < 0.92
           ? "bamboo"
           : chooseKind(bi, mid, h, table, along, season.dryingRacks);
-      if (kind && fits(kind, along, lateral, table, obstacles)) {
+      if (!kind) {
+        continue;
+      }
+      // Woods grow in stands with clearings between them, not evenly spaced.
+      let extra = 0;
+      if (TREES.has(kind) && kind !== "bamboo" && table.at(table.forest, along) > 0.5) {
+        const stand = tileNoise(along / 90 + seed * 0.01, lateral / 60 + 11);
+        if (stand < 0.36) {
+          continue;
+        }
+        extra = stand > 0.6 && band.max <= 150 ? 1 : 0;
+      }
+      if (fits(kind, along, lateral, table, obstacles)) {
         out.push({ kind, along, lateral, seed: hashU32(c * 977 + bi * 7919 + seed) });
+      }
+      for (let e = 0; e < extra; e++) {
+        const a2 = along + (h(6) - 0.5) * band.cell * 0.8;
+        const l2 = band.min + h(7) * (band.max - band.min);
+        const kind2 = h(8) < 0.5 ? kind : chooseKind(bi, mid, h, table, a2, season.dryingRacks);
+        if (kind2 && TREES.has(kind2) && fits(kind2, a2, l2, table, obstacles)) {
+          out.push({
+            kind: kind2,
+            along: a2,
+            lateral: l2,
+            seed: hashU32(c * 977 + bi * 7919 + seed + 31),
+          });
+        }
       }
     }
   });
 
+  placeHillTrees(out, cam, obstacles.tunnels, seed);
   placeRoadside(out, cam, table, obstacles, seed);
   placePylons(out, cam, table, obstacles, seed);
   placeSea(out, cam, table, seed);
@@ -273,6 +308,9 @@ function fits(
       }
     }
   }
+  if (insideTunnelHill(o.tunnels, along, lateral)) {
+    return false;
+  }
   if (lateral < 95 && !TREES.has(kind)) {
     for (const t of o.tunnels) {
       if (along > t.start - 220 && along < t.end + 220) {
@@ -281,6 +319,38 @@ function fits(
     }
   }
   return true;
+}
+
+/** Spacing (m) of the trees on the slopes near a tunnel mouth. */
+const HILL_TREE_CELL = 7;
+
+/**
+ * Trees standing on the near slopes of the hills over the tunnels, a mostly
+ * planted cedar wood; farther up the canopy is drawn with the hill itself.
+ */
+function placeHillTrees(out: Scenery[], cam: Camera, tunnels: readonly Span[], seed: number): void {
+  const [a0, a1] = cam.alongRange(HILL_TREES_REACH, 30);
+  for (const t of tunnels) {
+    const c0 = Math.floor(Math.max(a0, t.start) / HILL_TREE_CELL);
+    const c1 = Math.ceil(Math.min(a1, t.end) / HILL_TREE_CELL);
+    for (let c = c0; c <= c1; c++) {
+      for (let row = 0; row * HILL_TREE_CELL + 8 < HILL_TREES_REACH; row++) {
+        const h = (k: number) => hash3(c, row * 17 + k, seed ^ 0x4111);
+        const along = (c + 0.1 + h(1) * 0.8) * HILL_TREE_CELL;
+        const lateral = 8 + (row + 0.1 + h(2) * 0.8) * HILL_TREE_CELL;
+        if (hillWooded(t, along, lateral) <= 0.5 || h(3) > 0.85) {
+          continue;
+        }
+        out.push({
+          kind: hillEvergreen(along, lateral) ? "cedar" : "broadleaf",
+          along,
+          lateral,
+          seed: hashU32(c * 7919 + row * 131 + seed),
+          base: tunnelHill(t, along, lateral) + cam.rail,
+        });
+      }
+    }
+  }
 }
 
 function placeRoadside(

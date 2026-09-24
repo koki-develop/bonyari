@@ -1,10 +1,12 @@
 import { hex, type RGB } from "../../core/color.ts";
 import { clamp01, intervalCoverage, mod, pulseCoverage } from "../../core/math.ts";
-import { hash2 } from "../../core/random.ts";
+import { hash2, hash3 } from "../../core/random.ts";
 import type { Surface } from "../../core/surface.ts";
 import type { Bridge, Span } from "../../sim/route.ts";
-import type { Camera } from "../camera.ts";
-import type { Lighting } from "../lighting.ts";
+import { type Camera, EYE_ABOVE_RAIL } from "../camera.ts";
+import { HALF_GAUGE, NEXT_TRACK } from "../ground.ts";
+import type { Painter } from "../painter.ts";
+import { PORTAL_TOP, PORTAL_WALL_END, portalWallTop } from "./tunnel-hill.ts";
 import type { Shade } from "../shade.ts";
 
 /** Trackside pole spacing (m) and their lateral distances for single and double track. */
@@ -13,6 +15,17 @@ const POLE_OFFSET = 7;
 export const POLE_LATERAL_SINGLE = 3.2;
 export const POLE_LATERAL_DOUBLE = 6.4;
 export const BARRIER_LATERAL = 6.0;
+/** Height (m above the rails) of the barrier's concrete parapet. */
+const BARRIER_PARAPET = 0.75;
+const BARRIER_POST_SPACING = 2;
+/** Pitch (m) of the louvers in the absorbing panels. */
+const BARRIER_RIB = 0.16;
+/** Lateral distance (m) where the cable trough along the barrier's foot begins. */
+const TROUGH_NEAR = 5.35;
+/** Clear panels run in stretches of this length (m). */
+const BARRIER_CLEAR_RUN = 60;
+/** Spacing (m) of our car's windows, whose light falls on the barrier at night. */
+const WINDOW_PITCH = 2.4;
 export const TUNNEL_LATERAL = 2.5;
 export const TRUSS_LATERAL_SINGLE = 2.7;
 export const TRUSS_LATERAL_DOUBLE = 6.3;
@@ -21,11 +34,18 @@ const TRUSS_HEIGHT = 7.2;
 export const TUNNEL_LAMP_SPACING = 50;
 /** Height (m above the rails) of the tunnel lamps. */
 export const TUNNEL_LAMP_HEIGHT = 3.6;
+/** Length (m) of each cast ring of the tunnel lining. */
+const LINING_RING = 10.5;
+const NICHE_SPACING = 63;
 
 const POLE: RGB = [132, 128, 122];
 const WIRE: RGB = [34, 34, 38];
 const CONCRETE: RGB = [150, 146, 138];
+const PANEL: RGB = [168, 170, 162];
+const CLEAR_PANEL: RGB = [196, 214, 220];
+const STEEL: RGB = [104, 110, 108];
 const TUNNEL_WALL: RGB = [70, 68, 64];
+const MASONRY: RGB = [150, 140, 124];
 const SODIUM: RGB = [255, 168, 80];
 const BRIDGE_PAINT: readonly RGB[] = ["#a8483e", "#7d8f84", "#8aa6c0", "#b6b0a0"].map(hex);
 
@@ -96,22 +116,29 @@ export function drawPolesAndWires(
 }
 
 /**
- * Concrete noise barrier along viaducts. It stops at `gaps` (platforms), whose
- * ends are box-filtered like everything else passing close by.
+ * Noise barrier along viaducts: a concrete parapet carrying louvered sound
+ * absorbing panels between H-section posts, with clear panels along some
+ * stretches so the town shows through. Rain has streaked it below the joints,
+ * and at night the light from our own windows falls on it. It stops at `gaps`
+ * (platforms), whose ends are box-filtered like everything else passing close by.
+ * @param spill how strongly the lit car shines out onto nearby walls (0..1)
  */
 export function drawBarrier(
-  view: Surface,
-  cam: Camera,
-  shade: Shade,
+  p: Painter,
   height: (along: number) => number,
   gaps: readonly Span[],
+  spill: number,
 ): void {
+  const { view, cam } = p;
   const lateral = BARRIER_LATERAL;
-  shade.at(lateral);
+  p.at(lateral);
+  const shade = p.shade;
   const footprint = cam.footprint(lateral);
-  const r = shade.litR(CONCRETE[0]);
-  const g = shade.litG(CONCRETE[1]);
-  const b = shade.litB(CONCRETE[2]);
+  const face = p.surfaceLight(0, 0, 1);
+  const sideA = p.surfaceLight(-1, 0, 0.3);
+  const sideB = p.surfaceLight(1, 0, 0.3);
+  // Our car's windows throw soft patches of light out onto the barrier.
+  const night = spill * (1 - p.light.daylight);
   for (let x = 0; x < view.width; x++) {
     const along = cam.alongAt(x, lateral);
     const h = height(along);
@@ -125,11 +152,142 @@ export function drawBarrier(
     if (cov <= 0.01) {
       continue;
     }
-    const top = cam.yRail(lateral, h);
-    const seam = pulseCoverage(along, 2, 0.08, footprint) * 0.35;
-    column(view, x, top, view.height, r * (1 - seam), g * (1 - seam), b * (1 - seam), cov);
-    // Weathered cap.
-    column(view, x, top, top + 1, r * 1.12, g * 1.12, b * 1.12, cov);
+    const top = cam.yRail(lateral, h + 0.08);
+    const post = pulseCoverage(along + 0.08, BARRIER_POST_SPACING, 0.16, footprint);
+    // The flange facing the sun is lit, the other in shade.
+    const postK = mod(along + 0.08, BARRIER_POST_SPACING) < 0.08 ? sideA : sideB;
+    // Clear panels along some stretches, always from post to post.
+    const clear = hash2(Math.floor(along / BARRIER_CLEAR_RUN), 71) < 0.3;
+    // Rain streaks from the panel joints and the parapet top.
+    const streakCell = Math.floor(along / 0.12);
+    const streak = hash2(streakCell, 29);
+    const streakLen = 0.15 + 0.5 * hash2(streakCell, 31);
+    const glowX = (along - cam.pos) / WINDOW_PITCH;
+    const windowGlow = night > 0 ? night * (0.5 + 0.5 * Math.cos(glowX * Math.PI * 2)) ** 2 : 0;
+    const foot = Math.min(view.height, Math.ceil(cam.yRail(lateral, 0)));
+    for (let y = Math.max(0, Math.floor(top)); y < foot; y++) {
+      const hy = cam.railHeightAt(y, lateral);
+      const postTop = hy > h;
+      if (postTop && post <= 0.01) {
+        continue;
+      }
+      let c: RGB;
+      let k = face;
+      let alpha = cov;
+      if (hy < BARRIER_PARAPET) {
+        // Cast concrete parapet with a drip groove under its coping.
+        c = CONCRETE;
+        const below = BARRIER_PARAPET - hy;
+        if (below < 0.07) {
+          k *= 1.12;
+        } else if (below < 0.13) {
+          k *= 0.78;
+        } else if (streak > 0.75 && below < streakLen) {
+          // Rain streaks fade out downward.
+          k *= 1 - 0.16 * (1 - below / streakLen);
+        }
+        if (hy < 0.12) {
+          // Grime splashed up from the deck.
+          k *= 0.82 + hy * 1.5;
+        }
+      } else if (clear) {
+        // Tinted glazing over what lies beyond, with a slanting sheen and a frame on top.
+        c = CLEAR_PANEL;
+        const sheen = mod(along * 0.7 + hy * 1.6, 3.2) < 0.35 ? 1 : 0;
+        alpha *= hy > h - 0.06 || hy < BARRIER_PARAPET + 0.05 ? 1 : 0.18 + sheen * 0.14;
+        k *= 1.1;
+      } else {
+        // Louvered absorbing panels: a shadowed slot under each rib, a capping rail on top.
+        c = PANEL;
+        const rib = mod(hy - BARRIER_PARAPET, BARRIER_RIB) / BARRIER_RIB;
+        k *= rib < 0.3 ? 0.7 : rib > 0.8 ? 1.1 : 1;
+        const below = h - hy;
+        if (below < 0.05) {
+          k *= 1.15;
+        } else if (streak > 0.82 && below < streakLen * 0.6) {
+          k *= 1 - 0.12 * (1 - below / (streakLen * 0.6));
+        }
+      }
+      let r = c[0] * k;
+      let g = c[1] * k;
+      let b = c[2] * k;
+      if (post > 0.01) {
+        const a = postTop ? 1 : post;
+        r += (STEEL[0] * postK - r) * a;
+        g += (STEEL[1] * postK - g) * a;
+        b += (STEEL[2] * postK - b) * a;
+        alpha = postTop ? post * cov : Math.max(alpha, post * cov);
+      }
+      if (windowGlow > 0.01) {
+        const v = windowGlow * Math.exp(-((hy - 1.0) ** 2) / 0.5) * 2.5;
+        r *= 1 + v;
+        g *= 1 + v * 0.9;
+        b *= 1 + v * 0.7;
+      }
+      view.blend(x, y, shade.litR(r), shade.litG(g), shade.litB(b), alpha);
+    }
+    // Below the barrier's foot, the viaduct deck: a cable trough along the
+    // barrier and the adjacent track on its ballast.
+    const deckLight = p.surfaceLight(0, 1, 0.2);
+    for (let y = Math.max(0, foot); y < view.height; y++) {
+      const dy = y + 0.5 - cam.horizon;
+      const z = (EYE_ABOVE_RAIL * cam.focal) / dy;
+      const at = cam.pos + ((x + 0.5 - cam.cx) * z) / cam.focal;
+      const rowFoot = (z * z) / (EYE_ABOVE_RAIL * cam.focal);
+      const aFoot = z / cam.focal + Math.abs(cam.travel);
+      shade.at(z);
+      let r: number;
+      let g: number;
+      let b: number;
+      if (z > TROUGH_NEAR) {
+        // Concrete lids with joints.
+        const joint = pulseCoverage(at, 1, 0.04, aFoot);
+        const lip = intervalCoverage(z, TROUGH_NEAR, TROUGH_NEAR + 0.06, rowFoot);
+        const k = (1 - joint * 0.3) * (1 + lip * 0.15);
+        r = CONCRETE[0] * 0.92 * k;
+        g = CONCRETE[1] * 0.92 * k;
+        b = CONCRETE[2] * 0.92 * k;
+      } else {
+        const n = hash3(Math.floor(at * 5), Math.floor(z * 5), 9) * 26;
+        r = 104 + n;
+        g = 98 + n;
+        b = 92 + n;
+        if (z > NEXT_TRACK - 1.05 && z < NEXT_TRACK + 1.05) {
+          const sleeper = pulseCoverage(at, 0.62, 0.22, aFoot) * 0.8;
+          r += (124 - r) * sleeper;
+          g += (118 - g) * sleeper;
+          b += (110 - b) * sleeper;
+        }
+        const rail = Math.min(
+          1,
+          intervalCoverage(
+            z,
+            NEXT_TRACK - HALF_GAUGE - 0.04,
+            NEXT_TRACK - HALF_GAUGE + 0.04,
+            rowFoot,
+          ) +
+            intervalCoverage(
+              z,
+              NEXT_TRACK + HALF_GAUGE - 0.04,
+              NEXT_TRACK + HALF_GAUGE + 0.04,
+              rowFoot,
+            ),
+        );
+        r += (196 - r) * rail;
+        g += (196 - g) * rail;
+        b += (204 - b) * rail;
+      }
+      let k = deckLight;
+      if (night > 0) {
+        const gx = (at - cam.pos) / WINDOW_PITCH;
+        k +=
+          night *
+          (0.5 + 0.5 * Math.cos(gx * Math.PI * 2)) ** 2 *
+          2.2 *
+          Math.exp(-((z - 3.6) ** 2) / 3);
+      }
+      view.blend(x, y, shade.litR(r * k), shade.litG(g * k * 0.97), shade.litB(b * k * 0.92), cov);
+    }
   }
 }
 
@@ -220,78 +378,100 @@ export function drawRailing(
 }
 
 /**
- * Tunnel lining and portals. Inside, the wall fills the window; sodium lamps
- * streak past and our own windows light the wall faintly.
+ * Tunnel lining and portals. Inside, the wall fills the window: concrete cast
+ * in rings, stained by seeping water, with a cable trough along its foot and
+ * a refuge niche now and then. Sodium lamps streak past and our own windows
+ * light the wall faintly.
  */
-export function drawTunnel(
-  view: Surface,
-  cam: Camera,
-  shade: Shade,
-  light: Lighting,
-  tunnels: readonly Span[],
-  interiorSpill: number,
-): void {
+export function drawTunnel(p: Painter, tunnels: readonly Span[], interiorSpill: number): void {
+  const { view, cam } = p;
   const lateral = TUNNEL_LATERAL;
   const footprint = cam.footprint(lateral);
   const s = cam.scale(lateral);
   const lampY = cam.yRail(lateral, TUNNEL_LAMP_HEIGHT);
   const lampH = Math.max(1, 0.25 * s);
-  const ductY = cam.yRail(lateral, 1.3);
-  const [ar, ag, ab] = light.ambient;
+  const [ar, ag, ab] = p.light.ambient;
   for (let x = 0; x < view.width; x++) {
     const along = cam.alongAt(x, lateral);
     let inside = 0;
     for (const t of tunnels) {
       inside = Math.max(inside, intervalCoverage(along, t.start, t.end, footprint));
     }
-    if (inside > 0) {
-      // Deep inside there is no daylight, only lamps and our windows' glow.
-      let depth = 1;
-      for (const t of tunnels) {
-        if (along >= t.start - 5 && along <= t.end + 5) {
-          depth = clamp01(Math.min(along - t.start, t.end - along) / 60);
-        }
+    if (inside <= 0) {
+      continue;
+    }
+    // Deep inside there is no daylight, only lamps and our windows' glow.
+    let depth = 1;
+    for (const t of tunnels) {
+      if (along >= t.start - 5 && along <= t.end + 5) {
+        depth = clamp01(Math.min(along - t.start, t.end - along) / 60);
       }
-      const daylight = 1 - depth;
-      const spill = interiorSpill * Math.exp(-(((x - cam.cx) / (cam.width * 0.45)) ** 2));
-      const joint = pulseCoverage(along, 10.5, 0.25, footprint);
-      for (let y = 0; y < view.height; y++) {
-        const hy = cam.railHeightAt(y, lateral);
-        const vertical = Math.exp(-((hy - 1.8) ** 2) / 6);
-        let base =
-          TUNNEL_WALL[0] * (0.08 + spill * 0.5 * vertical) + TUNNEL_WALL[0] * ar * daylight * 0.8;
-        let g =
-          TUNNEL_WALL[1] * (0.08 + spill * 0.45 * vertical) + TUNNEL_WALL[1] * ag * daylight * 0.8;
-        let b =
-          TUNNEL_WALL[2] * (0.09 + spill * 0.38 * vertical) + TUNNEL_WALL[2] * ab * daylight * 0.8;
-        const k = 1 - joint * 0.3;
-        base *= k;
-        g *= k;
-        b *= k;
-        if (Math.abs(y + 0.5 - ductY) < 0.8) {
-          base *= 0.7;
-          g *= 0.7;
-          b *= 0.7;
-        }
-        view.blend(x, y, base, g, b, inside);
+    }
+    const daylight = 1 - depth;
+    const spill = interiorSpill * Math.exp(-(((x - cam.cx) / (cam.width * 0.45)) ** 2));
+    // Construction joints between the cast rings.
+    const joint = pulseCoverage(along, LINING_RING, 0.25, footprint);
+    // Refuge niches, recessed and dark.
+    const niche = pulseCoverage(along - LINING_RING * 0.5, NICHE_SPACING, 1.4, footprint);
+    // Lime leaching from some joints and cracks.
+    const ring = Math.floor(along / LINING_RING);
+    const leach = hash2(ring, 17) < 0.35 ? pulseCoverage(along, LINING_RING, 0.9, footprint) : 0;
+    const bracket = pulseCoverage(along, 1, 0.08, footprint);
+    const mottle = hash2(Math.floor(along * 1.5), 23);
+    const windows = (0.5 + 0.5 * Math.cos(((along - cam.pos) / WINDOW_PITCH) * Math.PI * 2)) ** 2;
+    for (let y = 0; y < view.height; y++) {
+      const hy = cam.railHeightAt(y, lateral);
+      const vertical = Math.exp(-((hy - 1.8) ** 2) / 6);
+      // Unlit wall tone, then light from the lamps' spill, our windows and the mouth.
+      let k = 0.92 + 0.16 * mottle + 0.08 * hash2(Math.floor(hy * 2), ring);
+      k *= 1 - joint * 0.35;
+      if (leach > 0 && hy > 0.8) {
+        k *= 1 + leach * 0.25 * hash2(Math.floor(along * 6), 41);
       }
-      // Lamps streak by.
-      const lamp = pulseCoverage(along, TUNNEL_LAMP_SPACING, 0.7, footprint) * inside;
-      if (lamp > 0.01) {
-        for (let y = Math.floor(lampY - 6); y < lampY + lampH + 6; y++) {
-          const d = y < lampY ? lampY - y : y > lampY + lampH ? y - lampY - lampH : 0;
-          const k = lamp * (d === 0 ? 1 : 0.35 * Math.exp(-d / 2.2));
-          view.add(x, y, SODIUM[0] * k, SODIUM[1] * k, SODIUM[2] * k);
-        }
+      if (hy > 0.9 && hy < 1.25) {
+        // Cable trough on brackets along the wall.
+        k *= hy > 1.17 ? 1.15 : 0.62;
+      } else if (hy > 0.6 && hy <= 0.9) {
+        k *= 1 - bracket * 0.4;
+      } else if (hy < 0.15) {
+        // Side ditch at the foot.
+        k *= 0.55;
+      }
+      if (niche > 0.01 && hy > 0 && hy < 2.1) {
+        k *= 1 - niche * 0.7;
+      }
+      // Our windows throw a row of light pools onto the wall.
+      const pool = spill * windows * Math.exp(-((hy - 1.9) ** 2) / 1.2);
+      const lit = 0.08 + spill * 0.3 * vertical + pool * 0.9;
+      const r = TUNNEL_WALL[0] * k * (lit + ar * daylight * 0.8);
+      const g = TUNNEL_WALL[1] * k * (lit * 0.9 + ag * daylight * 0.8);
+      const b = TUNNEL_WALL[2] * k * (lit * 0.76 + ab * daylight * 0.8) + TUNNEL_WALL[2] * 0.01;
+      view.blend(x, y, r, g, b, inside);
+    }
+    // Lamps streak by.
+    const lamp = pulseCoverage(along, TUNNEL_LAMP_SPACING, 0.7, footprint) * inside;
+    if (lamp > 0.01) {
+      for (let y = Math.floor(lampY - 6); y < lampY + lampH + 6; y++) {
+        const d = y < lampY ? lampY - y : y > lampY + lampH ? y - lampY - lampH : 0;
+        const k = lamp * (d === 0 ? 1 : 0.35 * Math.exp(-d / 2.2));
+        view.add(x, y, SODIUM[0] * k, SODIUM[1] * k, SODIUM[2] * k);
       }
     }
   }
-  drawPortals(view, cam, shade, tunnels);
+  drawPortals(p, tunnels);
 }
 
-/** The concrete face around each tunnel mouth. */
-function drawPortals(view: Surface, cam: Camera, shade: Shade, tunnels: readonly Span[]): void {
+/**
+ * The mouths of the tunnels, seen at a slant as we come up to them or leave:
+ * a masonry or concrete headwall with its coping and name plate over the arch,
+ * and wing walls stepping down on either side. Each ray is followed to where
+ * it crosses the plane of the portal; the hill above is `drawTunnelHills`.
+ */
+function drawPortals(p: Painter, tunnels: readonly Span[]): void {
+  const { view, cam, shade } = p;
   for (const t of tunnels) {
+    const masonry = hash2(Math.floor(t.start), 13) < 0.4;
+    const wall = masonry ? MASONRY : CONCRETE;
     for (const [face, dir] of [
       [t.start, 1],
       [t.end, -1],
@@ -301,31 +481,80 @@ function drawPortals(view: Surface, cam: Camera, shade: Shade, tunnels: readonly
       if (ahead * dir <= 0) {
         continue;
       }
+      // The face turns toward the train coming up to it.
+      const faceLight = p.surfaceLight(-dir, 0, 0.15);
+      const topLight = p.surfaceLight(-dir * 0.3, 0.95, 0.1);
       for (let x = 0; x < view.width; x++) {
         const dx = x + 0.5 - cam.cx;
         if (dx * ahead <= 0) {
           continue;
         }
+        // Lateral distance at which this column's ray crosses the portal plane.
         const z = (ahead * cam.focal) / dx;
-        if (z < TUNNEL_LATERAL || z > 14) {
+        if (z > PORTAL_WALL_END) {
           continue;
         }
-        shade.at(z);
-        const top = cam.yRail(z, 8.5 - (z - TUNNEL_LATERAL) * 0.25);
-        const bottom = cam.yRail(z, -0.5);
-        const moss = hash2(Math.floor(z * 2), 7) * 0.12;
-        for (let y = Math.max(0, Math.floor(top)); y < Math.min(view.height, bottom); y++) {
-          const edge = y === Math.floor(top) ? 1.18 : 1 - moss;
-          view.blend(
-            x,
-            y,
-            shade.litR(CONCRETE[0] * edge),
-            shade.litG(CONCRETE[1] * edge),
-            shade.litB(CONCRETE[2] * edge * 0.97),
-            1,
-          );
+        shade.at(Math.max(z, TUNNEL_LATERAL));
+        const wallTop = portalWallTop(z);
+        const yTop = Math.max(0, Math.floor(cam.yRail(z, wallTop)));
+        const yBottom = Math.min(view.height, Math.ceil(cam.yRail(z, -0.6)));
+        for (let y = yTop; y < yBottom; y++) {
+          const hy = cam.railHeightAt(y, z);
+          // The opening: the lining behind shows through.
+          if (z < TUNNEL_LATERAL && hy < archHeight(z)) {
+            continue;
+          }
+          let k = faceLight;
+          const below = wallTop - hy;
+          if (below < 0.35) {
+            // Coping stone, catching the light on top, with a drip line under it.
+            k = below < 0.08 ? topLight * 1.1 : faceLight * 1.08;
+          } else if (below < 0.45) {
+            k *= 0.7;
+          } else if (masonry) {
+            // Coursed stone blocks, offset course by course.
+            const course = Math.floor(hy / 0.55);
+            const u = z + (course % 2) * 0.45;
+            const bed = mod(hy, 0.55) < 0.07;
+            const head = mod(u, 0.9) < 0.07;
+            k *= bed || head ? 0.72 : 0.9 + 0.2 * hash2(Math.floor(u / 0.9), course);
+          } else {
+            // Formwork panel lines.
+            k *= mod(hy, 1.2) < 0.06 || mod(z, 2.4) < 0.05 ? 0.8 : 1;
+          }
+          // Water stains running down from the coping; damp low down.
+          const streak = hash2(Math.floor(z * 4), 19);
+          if (streak > 0.7 && below < 0.45 + streak * 3) {
+            k *= 0.86;
+          }
+          if (hy < 1.2) {
+            k *= 0.84 + hy * 0.13;
+          }
+          let r = wall[0] * k;
+          let g = wall[1] * k;
+          let b = wall[2] * k;
+          // The name plate over the arch.
+          if (z > 0.2 && z < 1.8 && hy > PORTAL_TOP - 2.1 && hy < PORTAL_TOP - 1.3) {
+            const text =
+              z > 0.4 &&
+              z < 1.6 &&
+              hy > PORTAL_TOP - 1.9 &&
+              hy < PORTAL_TOP - 1.5 &&
+              hash2(Math.floor(z * 6), Math.floor(hy * 8)) < 0.5;
+            r = (text ? 190 : 52) * faceLight;
+            g = (text ? 186 : 54) * faceLight;
+            b = (text ? 170 : 56) * faceLight;
+          }
+          view.set(x, y, shade.color(r, g, b));
         }
       }
     }
   }
+}
+
+/** Height (m above the rails) of the tunnel's opening at a lateral offset. */
+function archHeight(z: number): number {
+  const spring = 4;
+  const radius = TUNNEL_LATERAL + 0.2;
+  return spring + Math.sqrt(Math.max(0, radius * radius - z * z));
 }

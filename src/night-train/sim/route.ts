@@ -1,4 +1,4 @@
-import { clamp01, smoothstep } from "../core/math.ts";
+import { smoothstep } from "../core/math.ts";
 import { fbm1, Rng } from "../core/random.ts";
 
 export type SectionKind = "countryside" | "town" | "city" | "mountain" | "coast" | "river";
@@ -623,24 +623,6 @@ export class Route {
       e = e + (Math.max(e, target) - e) * ramp;
     }
     return e;
-  }
-
-  /**
-   * Extra hill height (m) that surrounds tunnel portals so tunnels bore into
-   * visible hillsides; 0 away from tunnels.
-   */
-  portalHill(along: number): number {
-    let h = 0;
-    for (const sec of this.nearSections(along)) {
-      for (const t of sec.tunnels) {
-        const inside = Math.min(
-          smoothstep(t.start - 180, t.start + 20, along),
-          1 - smoothstep(t.end - 20, t.end + 180, along),
-        );
-        h = Math.max(h, clamp01(inside));
-      }
-    }
-    return h;
   }
 }
 

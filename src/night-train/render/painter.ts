@@ -96,7 +96,7 @@ export class Painter {
 
   /** Screen y (unrounded) of a height (m) at the current distance. */
   y(height: number): number {
-    return this.cam.y(this.lateral, height);
+    return this.cam.y(this.lateral, height + this.base);
   }
 
   /** Fills [x0, x1) × [y0, y1) with a lit color. */
