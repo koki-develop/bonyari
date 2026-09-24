@@ -119,7 +119,7 @@ function grassTexture(
   detail: number,
   seed: number,
 ): void {
-  const tuft = detail > 0 ? cellNoise(along, z, 0.22, 0.16, foot, seed + 17) - 0.5 : 0;
+  const tuft = detail > 0 ? cellNoise(along, z, 0.12, 0.09, foot, seed + 17) - 0.5 : 0;
   const patch = tileNoise(along * 0.3 + seed * 0.37, z * 0.8);
   const k = 1 + tuft * 0.34 * detail + (patch - 0.5) * 0.22;
   p.r *= k;
@@ -581,19 +581,19 @@ export class GroundRenderer {
       set(p, gr * slope, gg * slope, gb * slope);
       grassTexture(p, along, z, foot, detail, seed);
       const bloom = tileNoise(along * 0.07 + 31, z * 0.4 + 17);
-      const flowers = sprinkle(along, z, 0.12, foot, this.wildflowers * 0.18 * bloom, seed + 19);
+      const flowers = sprinkle(along, z, 0.07, foot, this.wildflowers * 0.16 * bloom, seed + 19);
       blendInto(p, 238, 204, 56, flowers * (hash2(Math.floor(along * 3), 7) < 0.7 ? 1 : 0.4));
       const lilies = sprinkle(
         along,
         z,
-        0.16,
+        0.09,
         foot,
         this.higanbana * 0.3 * smoothstep(0.55, 0.75, bloom),
         seed + 23,
       );
       blendInto(p, 204, 40, 34, lilies);
-      blendInto(p, 236, 214, 60, sprinkle(along, z, 0.2, foot, canola * 0.3, seed + 29));
-      blendInto(p, 220, 206, 176, sprinkle(along, z, 0.3, foot, pampas * 0.22, seed + 31));
+      blendInto(p, 236, 214, 60, sprinkle(along, z, 0.08, foot, canola * 0.22, seed + 29));
+      blendInto(p, 220, 206, 176, sprinkle(along, z, 0.06, foot, pampas * 0.18, seed + 31));
       grain(p, along, z, foot, rowFoot, seed);
       return false;
     }
@@ -651,7 +651,7 @@ export class GroundRenderer {
         204,
         40,
         34,
-        path * sprinkle(along, z, 0.16, foot, this.higanbana * 0.5, seed + 23),
+        path * sprinkle(along, z, 0.09, foot, this.higanbana * 0.5, seed + 23),
       );
       this.plotPath = path;
       grain(p, along, z, foot, rowFoot, seed);
