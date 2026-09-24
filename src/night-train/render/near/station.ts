@@ -1,4 +1,4 @@
-import { hex, mix, type RGB } from "../../core/color.ts";
+import { hex, mix, type RGB, scale } from "../../core/color.ts";
 import { clamp01, intervalCoverage, pulseCoverage } from "../../core/math.ts";
 import { hash3, Rng } from "../../core/random.ts";
 import type { Surface } from "../../core/surface.ts";
@@ -6,6 +6,7 @@ import type { Station } from "../../sim/route.ts";
 import { EYE_ABOVE_RAIL, type Camera } from "../camera.ts";
 import type { Painter } from "../painter.ts";
 import { vendingMachine } from "../scenery/facade.ts";
+import { drawPerson } from "./people.ts";
 import type { Shade } from "../shade.ts";
 
 export const PLATFORM_EDGE = 1.65;
@@ -406,18 +407,7 @@ export function platformItems(station: Station, hour: number): PlatformItem[] {
   return items;
 }
 
-const CLOTHES: readonly RGB[] = [
-  "#2d3340",
-  "#5a4636",
-  "#7b2f35",
-  "#39527a",
-  "#d8d2c4",
-  "#4d6048",
-  "#9a8a70",
-  "#1f1f24",
-].map(hex);
-const HAIR: readonly RGB[] = ["#1c1a1a", "#2e2420", "#4a3a2e", "#8a8680"].map(hex);
-const SKIN: RGB = [226, 190, 160];
+const STAINLESS: RGB = [176, 180, 182];
 /** Sorted-waste bins: cans, bottles, burnables. */
 const BINS: readonly RGB[] = [
   [64, 110, 170],
@@ -429,48 +419,11 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
   const r = new Rng(item.seed);
   const lamps = p.light.lamps;
   switch (item.kind) {
-    case "person": {
+    case "person":
       // People stand still where they wait.
       p.at(item.lateral);
-      const s = p.s;
-      const cx = p.x(item.along);
-      const h = r.range(1.55, 1.8);
-      const coat = r.pick(CLOTHES);
-      const legs = r.pick(CLOTHES);
-      const hair = r.pick(HAIR);
-      const floor = p.cam.yRail(item.lateral, PLATFORM_HEIGHT);
-      const w = Math.max(1, Math.round(0.42 * s));
-      const hip = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h * 0.47);
-      const shoulder = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h * 0.82);
-      const headTop = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
-      const x0 = Math.round(cx - w / 2);
-      // Legs.
-      p.rect(x0, hip, x0 + Math.max(1, w / 2), floor, legs);
-      p.rect(x0 + w / 2, hip, x0 + w, floor, mix(legs, [0, 0, 0], 0.15));
-      // Coat.
-      p.rect(
-        x0 - (s > 6 ? 1 : 0),
-        shoulder,
-        x0 + w + (s > 6 ? 1 : 0),
-        hip + Math.max(1, 0.1 * s),
-        coat,
-      );
-      // Head.
-      const hw = Math.max(1, Math.round(0.2 * s));
-      p.rect(cx - hw / 2, headTop, cx + hw / 2, shoulder, SKIN);
-      p.rect(
-        cx - hw / 2,
-        headTop,
-        cx + hw / 2,
-        headTop + Math.max(1, (shoulder - headTop) * 0.45),
-        hair,
-      );
-      if (lamps > 0.3 && r.chance(0.4)) {
-        // Looking at a phone.
-        p.lightDot(cx + hw / 2, (shoulder + hip) / 2 - 1, [200, 225, 255], 0.9);
-      }
+      drawPerson(p, item.along, PLATFORM_HEIGHT, item.seed);
       return;
-    }
     case "bench": {
       p.at(item.lateral);
       const s = p.s;
@@ -490,14 +443,29 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
       vendingMachine(p, item.along, item.lateral, PLATFORM_HEIGHT, item.seed, true);
       return;
     case "bin": {
+      // A stainless cabinet with three sorted openings, each under its colored label.
       p.at(item.lateral);
       const s = p.s;
       const cx = p.x(item.along);
-      const top = p.cam.yRail(item.lateral, PLATFORM_HEIGHT + 0.9);
-      const floor = p.cam.yRail(item.lateral, PLATFORM_HEIGHT);
+      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
+      const half = 0.7 * s;
+      const face = p.surfaceLight(0, 0, 1);
+      const cap = p.surfaceLight(0, 1, 0.3);
+      p.rect(cx - half, Y(0.95), cx + half, Y(0), scale(STAINLESS, face));
+      p.rect(cx - half - 1, Y(1.0), cx + half + 1, Y(0.93), scale(STAINLESS, cap * 1.1));
+      p.rect(cx - half, Y(0.06), cx + half, Y(0), [60, 60, 62]);
       for (let i = 0; i < 3; i++) {
-        const x0 = cx + (i - 1.5) * 0.5 * s;
-        p.rect(x0, top, x0 + 0.45 * s, floor, BINS[i]);
+        const ox = cx + (i - 1) * 0.46 * s;
+        const w = 0.17 * s;
+        p.rect(ox - w, Y(0.88), ox + w, Y(0.78), BINS[i]);
+        if (s > 5) {
+          p.disc(ox, Y(0.66), Math.max(1, 0.09 * s), [24, 24, 26]);
+        } else {
+          p.rect(ox - w * 0.6, Y(0.72), ox + w * 0.6, Y(0.6), [24, 24, 26]);
+        }
+        if (i < 2) {
+          p.rect(ox + 0.23 * s, Y(0.9), ox + 0.23 * s + 1, Y(0.08), scale(STAINLESS, face * 0.8));
+        }
       }
       return;
     }
@@ -564,27 +532,10 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
       }
       return;
     }
-    case "sitter": {
+    case "sitter":
       p.at(item.lateral);
-      const s = p.s;
-      const cx = p.x(item.along);
-      const Y = (h: number) => p.cam.yRail(item.lateral, PLATFORM_HEIGHT + h);
-      const coat = r.pick(CLOTHES);
-      const legs = r.pick(CLOTHES);
-      const w = Math.max(1, Math.round(0.42 * s));
-      const x0 = Math.round(cx - w / 2);
-      // Lower legs, thighs on the seat, torso, head.
-      p.rect(x0 + w * 0.2, Y(0.45), x0 + w * 0.8, Y(0), legs);
-      p.rect(x0, Y(0.55), x0 + w + Math.round(0.15 * s), Y(0.42), legs);
-      p.rect(x0, Y(1.1), x0 + w, Y(0.5), coat);
-      const hw = Math.max(1, Math.round(0.2 * s));
-      p.rect(cx - hw / 2, Y(1.35), cx + hw / 2, Y(1.1), SKIN);
-      p.rect(cx - hw / 2, Y(1.35), cx + hw / 2, Y(1.26), r.pick(HAIR));
-      if (lamps > 0.3 && r.chance(0.5)) {
-        p.lightDot(cx + hw, Y(0.75), [200, 225, 255], 0.9);
-      }
+      drawPerson(p, item.along, PLATFORM_HEIGHT, item.seed, 0.45);
       return;
-    }
     case "stairs": {
       // Glazed walls round the stairwell; the cover steps down with the stairs.
       p.at(item.lateral);
@@ -644,9 +595,8 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
       // A bench inside and someone waiting.
       p.rect(x0 + s * 0.4, Y(0.48), x1 - s * 0.4, Y(0.42), [110, 90, 70]);
       if (r.chance(0.5)) {
-        const px = x0 + (x1 - x0) * r.range(0.25, 0.75);
-        p.rect(px - 0.2 * s, Y(1.1), px + 0.2 * s, Y(0.45), r.pick(CLOTHES));
-        p.rect(px - 0.1 * s, Y(1.33), px + 0.1 * s, Y(1.1), SKIN);
+        const along = item.along + item.length * r.range(0.25, 0.75);
+        drawPerson(p, along, PLATFORM_HEIGHT, item.seed ^ 0x9e37, 0.45);
       }
       // Frame, roof slab and a sliding door in the middle.
       for (
