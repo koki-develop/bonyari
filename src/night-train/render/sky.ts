@@ -1,6 +1,6 @@
-import { mix, pack } from "../core/color.ts";
+import { pack } from "../core/color.ts";
 import { clamp01, lerp, smoothstep } from "../core/math.ts";
-import { fbm1, hash, hash2, noise2, Rng } from "../core/random.ts";
+import { hash, hash2, hashU32, noise2, Rng } from "../core/random.ts";
 import { bayer, type Surface } from "../core/surface.ts";
 import { LATITUDE, type HorizonVector } from "../sim/astro.ts";
 import { makeTerrainScratch } from "../sim/route.ts";
@@ -52,7 +52,20 @@ function buildCloudTexture(seed: number): Float32Array {
   return tex;
 }
 
+/** A rounded lobe of a towering cloud, in screen pixels. */
+interface Lobe {
+  x: number;
+  y: number;
+  r: number;
+  /** Vertical squash; below 1 flattens it. */
+  squash: number;
+  /** How far (px) it stands out toward the viewer. */
+  z: number;
+}
+
 export class SkyRenderer {
+  /** Scratch list for the lobes of the cloud being drawn. */
+  private readonly lobes: Lobe[] = [];
   private readonly starX: Float32Array;
   private readonly starY: Float32Array;
   private readonly starZ: Float32Array;
@@ -306,65 +319,180 @@ export class SkyRenderer {
     const lateral = 28000;
     const spacing = 16000;
     const [a0, a1] = cam.alongRange(lateral, 60);
-    const sunSide = cam.toCamera(world.sky.sun).right >= 0 ? 1 : -1;
-    const fog = 0.45;
+    const sun = cam.toCamera(world.sky.sun);
+    const sunLen = Math.hypot(sun.right, sun.up, sun.forward) || 1;
+    const lx = sun.right / sunLen;
+    const ly = sun.up / sunLen;
+    // Toward the viewer: the sun behind us lights the faces we see.
+    const lz = -sun.forward / sunLen;
+    const scale = cam.scale(lateral);
+    const base = cam.y(lateral, 1500);
     for (let i = Math.floor(a0 / spacing); i <= Math.ceil(a1 / spacing); i++) {
       if (hash(i, this.seed, 71) > amount * 0.55) {
         continue;
       }
       const along = (i + 0.5 + (hash(i, this.seed, 72) - 0.5) * 0.7) * spacing;
       const cx = cam.x(along, lateral);
-      const scale = cam.scale(lateral);
       // Mature storms grow an anvil; younger towers are lumpier and lower.
       const mature = hash(i, this.seed, 75) < 0.45;
-      const width = (2500 + 5000 * hash(i, this.seed, 73)) * scale;
+      const width =
+        (mature ? 9000 + 7000 * hash(i, this.seed, 73) : 5000 + 5000 * hash(i, this.seed, 73)) *
+        scale;
       const height =
         (mature ? 9000 + 5000 * hash(i, this.seed, 74) : 4500 + 4000 * hash(i, this.seed, 74)) *
         scale *
         (0.6 + 0.4 * amount);
-      const shape = 1.4 + 1.8 * hash(i, this.seed, 76);
-      const lumpiness = mature ? 0.22 : 0.4;
-      const lumpScale = 0.1 + 0.12 * hash(i, this.seed, 77);
-      const base = cam.y(lateral, 1500);
-      for (let x = Math.floor(cx - width); x <= Math.ceil(cx + width); x++) {
-        if (x < 0 || x >= view.width) {
-          continue;
-        }
-        const t = (x + 0.5 - cx) / width;
-        const lumps = fbm1((x - cx) / Math.max(1.5, width * lumpScale) + i * 13, this.seed + 5, 3);
-        const lit = clamp01(0.5 + t * sunSide * 0.9);
-        // A cauliflower tower...
-        const column =
-          Math.sqrt(Math.max(0, 1 - Math.abs(t / 0.55) ** shape)) *
-          (1 - lumpiness + lumpiness * 1.4 * lumps);
-        this.cloudSpan(view, cam, light, x, base - height * column, base, base, height, lit, fog);
-        // ...spreading into an anvil at the top.
-        if (mature && Math.abs(t) < 1) {
-          const anvilTop = base - height * (1.02 - 0.1 * Math.abs(t) + 0.04 * lumps);
-          const anvilBottom = base - height * (0.84 + 0.1 * Math.abs(t));
-          this.cloudSpan(view, cam, light, x, anvilTop, anvilBottom, base, height, lit, fog);
-        }
+      if (cx + width * 1.6 < 0 || cx - width * 1.6 > view.width) {
+        continue;
       }
+      this.cumulonimbus(
+        view,
+        light,
+        cx,
+        base,
+        width,
+        height,
+        mature,
+        hashU32(i * 7919 + this.seed),
+        lx,
+        ly,
+        lz,
+        cam.horizon,
+      );
     }
   }
 
-  private cloudSpan(
+  /**
+   * A towering cumulus built from rounded lobes: a broad, flat-based foot,
+   * turrets stacked and narrowing upward, and on mature storms a wide anvil
+   * sheared off to one side. Each lobe is shaded as a rounded mass lit from
+   * the sun's side; the far haze softens it all.
+   */
+  private cumulonimbus(
     view: Surface,
-    cam: Camera,
     light: Lighting,
-    x: number,
-    top: number,
-    bottom: number,
+    cx: number,
     base: number,
+    width: number,
     height: number,
-    lit: number,
-    fog: number,
+    mature: boolean,
+    seed: number,
+    lx: number,
+    ly: number,
+    lz: number,
+    horizon: number,
   ): void {
-    for (let y = Math.max(0, Math.floor(top)); y < Math.min(bottom, cam.horizon); y++) {
-      const vh = (base - y) / height;
-      const shade = clamp01(lit * 0.7 + vh * 0.5);
-      const c = mix(mix(light.cloudShade, light.cloudLit, shade), light.horizon, fog);
-      view.blend(x, y, c[0], c[1], c[2], 0.92 * smoothstep(0, 0.04, vh));
+    const r = new Rng(seed);
+    const lobes = this.lobes;
+    lobes.length = 0;
+    const tower = mature ? 0.9 : 1;
+    const levels = 8;
+    const step = height / levels;
+    let drift = 0;
+    for (let k = 0; k < levels; k++) {
+      const v = (k + 0.5) / levels;
+      // A broad foot; the mass narrows into turrets and leans a little as it rises.
+      const half = (width / 2) * (1 - 0.6 * v * v) * r.range(0.85, 1.1);
+      drift += r.range(-0.05, 0.05) * width;
+      const count = Math.max(1, Math.round((half * 2) / (step * 1.1)) + r.int(0, 1));
+      for (let j = 0; j < count; j++) {
+        const t = count === 1 ? 0 : j / (count - 1) - 0.5;
+        const rad = step * r.range(0.75, 1.1) * (1 + (1 - v) * 0.2);
+        lobes.push({
+          x: cx + drift * v + t * 2 * (half - rad * 0.4) + r.range(-0.2, 0.2) * rad,
+          y: base - v * height * tower + r.range(-0.15, 0.15) * rad,
+          r: rad,
+          squash: 1,
+          z: r.range(0, 1) * rad + (count === 1 ? rad * 0.5 : (0.5 - Math.abs(t)) * rad),
+        });
+      }
+    }
+    if (mature) {
+      // The anvil: flattened, spread wide and blown to one side.
+      const side = r.chance(0.5) ? 1 : -1;
+      const top = base - height;
+      const span = width * r.range(1.3, 1.8);
+      for (let j = 0; j < 7; j++) {
+        const t = j / 6 - 0.35;
+        lobes.push({
+          x: cx + drift + side * t * span,
+          y: top + height * 0.06 + r.range(-0.02, 0.02) * height,
+          r: span * r.range(0.2, 0.26) * (1 - Math.abs(t) * 0.5),
+          squash: 0.28,
+          z: height * 0.1,
+        });
+      }
+    }
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    for (const l of lobes) {
+      x0 = Math.min(x0, l.x - l.r);
+      x1 = Math.max(x1, l.x + l.r);
+      y0 = Math.min(y0, l.y - l.r * l.squash);
+    }
+    const massX = (x0 + x1) / 2;
+    const massRx = Math.max(1, (x1 - x0) / 2);
+    const massY = base - height * 0.45;
+    const massRy = height * 0.6;
+    const [sr, sg, sb] = light.cloudShade;
+    const [cr, cg, cb] = light.cloudLit;
+    const [hr, hg, hb] = light.horizon;
+    const fog = 0.4;
+    const yEnd = Math.min(Math.ceil(base), Math.floor(horizon), view.height);
+    for (let y = Math.max(0, Math.floor(y0)); y < yEnd; y++) {
+      for (let x = Math.max(0, Math.floor(x0)); x <= Math.min(view.width - 1, Math.ceil(x1)); x++) {
+        let bestZ = -Infinity;
+        let nx = 0;
+        let ny = 0;
+        let nz = 0;
+        let rim = 0;
+        let covering = 0;
+        for (let i = 0; i < lobes.length; i++) {
+          const l = lobes[i];
+          const dx = (x + 0.5 - l.x) / l.r;
+          const dy = (y + 0.5 - l.y) / (l.r * l.squash);
+          const d2 = dx * dx + dy * dy;
+          if (d2 >= 1) {
+            continue;
+          }
+          covering++;
+          const z = l.z + l.r * l.squash * Math.sqrt(1 - d2);
+          if (z > bestZ) {
+            bestZ = z;
+            nx = dx;
+            ny = -dy;
+            nz = Math.sqrt(1 - d2);
+            rim = Math.sqrt(d2);
+          }
+        }
+        if (bestZ === -Infinity) {
+          continue;
+        }
+        // Shade the lobes as bumps on the rounded mass of the whole cloud, so
+        // they read as its surface rather than as separate balls.
+        const vx = (x + 0.5 - massX) / massRx;
+        const vy = -(y + 0.5 - massY) / massRy;
+        const vz = Math.sqrt(Math.max(0, 1 - vx * vx - vy * vy));
+        nx = nx * 0.45 + vx * 0.55;
+        ny = ny * 0.45 + vy * 0.55;
+        nz = nz * 0.45 + vz * 0.55;
+        const len = Math.hypot(nx, ny, nz) || 1;
+        nx /= len;
+        ny /= len;
+        nz /= len;
+        // Bright on the sun's side, blue-grey in shade, darker toward the flat
+        // base where little light reaches.
+        const diffuse = Math.max(0, nx * lx + ny * ly + nz * lz);
+        const under = smoothstep(height * 0.35, 0, base - y);
+        const k = clamp01(0.28 + 0.72 * diffuse + 0.15 * ny) * (1 - under * 0.45);
+        const pr = sr + (cr - sr) * k;
+        const pg = sg + (cg - sg) * k;
+        const pb = sb + (cb - sb) * k;
+        // Only the outline is soft; inside, lobes overlap opaquely.
+        const alpha = covering === 1 ? 0.95 * (1 - smoothstep(0.82, 1, rim) * 0.6) : 0.95;
+        view.blend(x, y, pr + (hr - pr) * fog, pg + (hg - pg) * fog, pb + (hb - pb) * fog, alpha);
+      }
     }
   }
 
