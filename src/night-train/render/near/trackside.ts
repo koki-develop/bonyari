@@ -271,6 +271,8 @@ export function drawBarrier(
     if (!barrierColumn(cam, x, view.height, height, gaps, col)) {
       continue;
     }
+    // The deck below each column is shaded at its own distances; the barrier at its own.
+    shade.at(lateral);
     const { along, h, cov, post, clear, foot } = col;
     // The flange facing the sun is lit, the other in shade.
     const postK = mod(along + 0.08, BARRIER_POST_SPACING) < 0.08 ? sideA : sideB;
