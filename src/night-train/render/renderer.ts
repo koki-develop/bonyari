@@ -612,12 +612,10 @@ export class Renderer {
         return;
       case "oncoming": {
         drawOncoming(
-          view,
-          cam,
-          this.shade,
-          light,
+          this.painter,
           d.train,
           (d.train.speed + world.train.speed) * this.frameDt,
+          options.lampOn,
         );
         return;
       }
