@@ -288,10 +288,12 @@ export class SkyRenderer {
         const dx = (x + 0.5 - p.x) / r;
         const dy = -(y + 0.5 - p.y) / r;
         const d2 = dx * dx + dy * dy;
-        if (d2 > 1) {
+        // Soft, pixel-wide limb.
+        const edge = clamp01((1 - Math.sqrt(d2)) * r + 0.5);
+        if (edge <= 0) {
           continue;
         }
-        const dz = Math.sqrt(1 - d2);
+        const dz = Math.sqrt(Math.max(0, 1 - d2));
         // Surface normal in camera space against the sun's direction.
         const lit = dx * sunCam.right + dy * sunCam.up - dz * sunCam.forward;
         const k = smoothstep(-0.06, 0.1, lit);
@@ -300,7 +302,11 @@ export class SkyRenderer {
         const cr = lerp(26, 238 * mare, k);
         const cg = lerp(30, 234 * mare, k);
         const cb = lerp(44, 214 * mare, k);
-        view.blend(x, y, cr, cg, cb, alpha * (k > 0.02 ? 1 : 0.55) * (0.4 + 0.6 * through));
+        // The unlit part only shows against a dark sky (earthshine); by day it
+        // is lost in the blue.
+        const dark = 0.55 * (1 - smoothstep(0.05, 0.4, daylight));
+        const a = alpha * (k + (1 - k) * dark) * (0.4 + 0.6 * through) * edge;
+        view.blend(x, y, cr, cg, cb, a);
       }
     }
   }
