@@ -28,6 +28,10 @@ export interface SeasonState {
   dryingRacks: number;
   /** Pampas grass (susuki) plumes. */
   pampas: number;
+  /** Dandelions and clover flowering in the grass by the line. */
+  wildflowers: number;
+  /** Red spider lilies (higanbana) along the embankments around the equinox. */
+  higanbana: number;
   cicadas: number;
   frogs: number;
   crickets: number;
@@ -111,6 +115,8 @@ export function computeSeason(yearFraction: number): SeasonState {
     paddyFlooded: cyclicBump(f, 0.21, 0.06, 0.03, 1),
     dryingRacks: cyclicBump(f, 0.6, 0.05, 0.02, 1),
     pampas: cyclicBump(f, 0.64, 0.12, 0.04, 1),
+    wildflowers: cyclicBump(f, 0.14, 0.1, 0.04, 1),
+    higanbana: cyclicBump(f, 0.555, 0.022, 0.012, 1),
     cicadas: cyclicBump(f, 0.4, 0.13, 0.04, 1),
     frogs: cyclicBump(f, 0.26, 0.16, 0.04, 1),
     crickets: cyclicBump(f, 0.56, 0.18, 0.05, 1),

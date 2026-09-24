@@ -136,3 +136,36 @@ export function randomSeed(): number {
   crypto.getRandomValues(buf);
   return buf[0];
 }
+
+/** Side (cells) of the precomputed tile behind `tileNoise`. */
+const TILE = 256;
+const TILE_NOISE = (() => {
+  const t = new Float32Array(TILE * TILE);
+  for (let i = 0; i < t.length; i++) {
+    t[i] = hash2(i, 0x5a17);
+  }
+  return t;
+})();
+
+/**
+ * Smooth value noise in [0, 1], tiling every 256 units: a cheap stand-in for
+ * `noise2` in per-pixel loops.
+ */
+export function tileNoise(u: number, v: number): number {
+  const iu = Math.floor(u);
+  const iv = Math.floor(v);
+  let fu = u - iu;
+  let fv = v - iv;
+  fu = fu * fu * (3 - 2 * fu);
+  fv = fv * fv * (3 - 2 * fv);
+  const x0 = iu & (TILE - 1);
+  const x1 = (iu + 1) & (TILE - 1);
+  const y0 = (iv & (TILE - 1)) * TILE;
+  const y1 = ((iv + 1) & (TILE - 1)) * TILE;
+  const a = TILE_NOISE[y0 + x0];
+  const b = TILE_NOISE[y0 + x1];
+  const c = TILE_NOISE[y1 + x0];
+  const d = TILE_NOISE[y1 + x1];
+  const top = a + (b - a) * fu;
+  return top + (c + (d - c) * fu - top) * fv;
+}

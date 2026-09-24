@@ -1,6 +1,6 @@
 import { pack } from "../core/color.ts";
 import { clamp01, DEG, intervalCoverage, lerp, pulseCoverage, smoothstep } from "../core/math.ts";
-import { hash2, hash3 } from "../core/random.ts";
+import { hash2, hash3, tileNoise } from "../core/random.ts";
 import { bayer, type Surface } from "../core/surface.ts";
 import type { Bridge, Crossing } from "../sim/route.ts";
 import type { World } from "../sim/world.ts";
@@ -14,11 +14,14 @@ const PLOT_LATERAL = 23;
 const MAX_GROUND = 40000;
 const STEP = 5;
 /** Center of the adjacent track and half its gauge (Japanese narrow gauge). */
-const NEXT_TRACK = 4;
-const HALF_GAUGE = 0.53;
+/** Lateral distance (m) of the adjacent track's center line. */
+export const NEXT_TRACK = 4;
+export const HALF_GAUGE = 0.53;
 
 /** Grassy verge (m) between the embankment and the first fields. */
 const VERGE = 3;
+/** Offset (m) of each lane's center from the road's center line. */
+const LANE = 1.7;
 /** Size (m) of the patches that make up yards and lots. */
 const LOT = 7;
 /** Size (m) of the fine texture cells: small along, finer across. */
@@ -64,6 +67,85 @@ function grain(p: Px, along: number, z: number, foot: number, rowFoot: number, s
 }
 
 /**
+ * Cell noise in [0, 1] over the ground that the motion blur smears along the
+ * track: once the footprint outgrows a cell, it fades into a per-row streak
+ * instead of flickering from frame to frame.
+ */
+function cellNoise(
+  along: number,
+  z: number,
+  cellAlong: number,
+  cellLateral: number,
+  foot: number,
+  seed: number,
+): number {
+  const row = Math.floor(z / cellLateral);
+  const sharp = cellAlong / Math.max(cellAlong, foot);
+  const streak = hash3(row, seed, 43);
+  const speck = hash3(Math.floor(along / cellAlong), row, seed);
+  return 0.5 + (streak - 0.5) * (1 - sharp) * 0.5 + (speck - 0.5) * sharp;
+}
+
+/**
+ * A sprinkle of small things (flowers, stubble) covering `density` of the
+ * ground: sharp dots when they can be seen, their average tint once blurred.
+ * Returns how much of the pixel they cover.
+ */
+function sprinkle(
+  along: number,
+  z: number,
+  cell: number,
+  foot: number,
+  density: number,
+  seed: number,
+): number {
+  if (density <= 0) {
+    return 0;
+  }
+  const sharp = cell / Math.max(cell, foot);
+  const dot = hash3(Math.floor(along / cell), Math.floor(z / cell), seed) < density ? 1 : 0;
+  return dot * sharp + density * (1 - sharp);
+}
+
+/** Grass texture: tufts up close and lusher or drier patches farther out. */
+function grassTexture(
+  p: Px,
+  along: number,
+  z: number,
+  foot: number,
+  detail: number,
+  seed: number,
+): void {
+  const tuft = detail > 0 ? cellNoise(along, z, 0.22, 0.16, foot, seed + 17) - 0.5 : 0;
+  const patch = tileNoise(along * 0.3 + seed * 0.37, z * 0.8);
+  const k = 1 + tuft * 0.34 * detail + (patch - 0.5) * 0.22;
+  p.r *= k;
+  p.g *= k;
+  p.b *= k;
+  if (patch > 0.68) {
+    // Straw-colored stretches where the grass has dried.
+    blendInto(p, 168, 150, 100, (patch - 0.68) * 1.1);
+  }
+}
+
+/** Tilled soil: clods and furrow shadows up close, damper and drier patches. */
+function soilTexture(
+  p: Px,
+  along: number,
+  z: number,
+  foot: number,
+  detail: number,
+  seed: number,
+): void {
+  const clod = detail > 0 ? cellNoise(along, z, 0.16, 0.1, foot, seed + 37) - 0.5 : 0;
+  const damp = tileNoise(along * 0.12 + 71, z * 0.3 + seed * 0.23);
+  const k = 1 + clod * 0.3 * detail - (damp - 0.5) * 0.24;
+  p.r *= k;
+  p.g *= k;
+  p.b *= k;
+}
+
+/**
  * The ground plane, rendered per pixel by casting each pixel's ray onto it:
  * fields, roads, the adjacent track, rivers under bridges, beaches and the sea.
  * Everything that repeats is box-filtered over the pixel footprint plus the
@@ -71,6 +153,11 @@ function grain(p: Px, along: number, z: number, foot: number, rowFoot: number, s
  */
 export class GroundRenderer {
   private readonly px: Px = { r: 0, g: 0, b: 0 };
+  private wildflowers = 0;
+  private higanbana = 0;
+  /** What `land` found at the last pixel, for the snow over it. */
+  private plotPath = 0;
+  private roadOffset = Infinity;
 
   render(
     view: Surface,
@@ -107,6 +194,12 @@ export class GroundRenderer {
     const flooded = season.paddyFlooded;
     const canola = season.canola;
     const pampas = season.pampas;
+    this.wildflowers = season.wildflowers;
+    this.higanbana = season.higanbana;
+    // Sunlight on the snow: drifts are lit on the sun's side, blue in their shade.
+    const sun = cam.toCamera(world.sky.sun);
+    const direct = light.direct;
+    const glitter = direct * smoothstep(0.5, 1, snow);
     const [gr, gg, gb] = season.grass;
     const [pr, pg, pb] = season.paddy;
     const eye = cam.eye;
@@ -193,14 +286,42 @@ export class GroundRenderer {
             );
             // A flooded paddy is mostly sky reflection with rows of seedlings.
             water = paddy;
-            // Snow settles on everything but water; roads stay darker.
+            // Snow settles on everything but water, in drifts; roads and plot paths show through.
             if (!water && snow > 0) {
-              // Soft drifts rather than per-pixel noise.
-              const keep =
-                1 - snow * (0.86 + 0.14 * hash2(Math.floor(along / 3), Math.floor(z / 2)));
-              p.r = lerp(236, p.r, keep);
-              p.g = lerp(240, p.g, keep);
-              p.b = lerp(248, p.b, keep);
+              const e = 0.9;
+              const drift = tileNoise(along * 0.09 + 101, z * 0.2 + 53);
+              const gA = (tileNoise((along + e) * 0.09 + 101, z * 0.2 + 53) - drift) / e;
+              const gZ = (tileNoise(along * 0.09 + 101, (z + e) * 0.2 + 53) - drift) / e;
+              const amp = 2.5 * snow;
+              const len = Math.hypot(gA * amp, 1, gZ * amp);
+              const diffuse = Math.max(
+                0,
+                (-gA * amp * sun.right + sun.up + gZ * amp * -sun.forward) / len,
+              );
+              const lit = (1 - direct) * 0.92 + direct * (0.62 + 0.55 * diffuse);
+              // Thin snow lets the ground show through in patches.
+              const depth = snow * (0.75 + 0.5 * drift);
+              let cover = clamp01(depth * 1.25 - 0.1);
+              if (this.roadOffset < 3.6) {
+                // Wheel ruts worn through on the road.
+                const rut = Math.abs(Math.abs(this.roadOffset - LANE) - 0.75) < 0.22 ? 0.55 : 0.2;
+                cover *= 1 - rut;
+              }
+              cover *= 1 - this.plotPath * 0.25;
+              const shadowBlue = 1 - lit;
+              const sr = 250 * lit - 36 * shadowBlue;
+              const sg = 250 * lit - 22 * shadowBlue;
+              const sb = 252 * lit + 8 * shadowBlue;
+              p.r = lerp(p.r, sr, cover);
+              p.g = lerp(p.g, sg, cover);
+              p.b = lerp(p.b, sb, cover);
+              if (
+                glitter > 0 &&
+                detail > 0.3 &&
+                hash3(x, y, Math.floor(time * 5)) < 0.006 * glitter
+              ) {
+                p.r = p.g = p.b = 300;
+              }
             }
             if (!water && wet > 0) {
               const k = 1 - wet * 0.22;
@@ -336,6 +457,8 @@ export class GroundRenderer {
     pampas: number,
     time: number,
   ): boolean {
+    this.plotPath = 0;
+    this.roadOffset = Infinity;
     // Adjacent track.
     const twin = z < 6 ? table.at(table.doubleTrack, along) : 0;
     if (twin > 0.5 && z < NEXT_TRACK + 1.6) {
@@ -377,6 +500,7 @@ export class GroundRenderer {
     }
 
     if (crossing || onRoad) {
+      this.roadOffset = crossing ? 0 : Math.abs(z - road);
       // Asphalt, with a dashed center line along the parallel road.
       set(p, 84, 84, 88);
       if (onRoad && !crossing) {
@@ -414,19 +538,25 @@ export class GroundRenderer {
     }
 
     if (z < embankment + VERGE) {
-      // Grassy embankment slope and verge, with seasonal flowers.
+      // Grassy embankment slope and verge: tufts, lusher and drier patches, and
+      // the flowers of the season.
       const slope = z < embankment ? 0.86 : 0.95;
       set(p, gr * slope, gg * slope, gb * slope);
-      const h = hash3(Math.floor(along * 3), Math.floor(z * 3), 17);
-      const clump = detail * (h - 0.5) * 0.25;
-      p.r *= 1 + clump;
-      p.g *= 1 + clump;
-      p.b *= 1 + clump;
-      if (canola > 0 && h > 1 - canola * 0.35) {
-        blendInto(p, 236, 214, 60, detail * 0.9 + (1 - detail) * canola * 0.25);
-      } else if (pampas > 0 && h < pampas * 0.25) {
-        blendInto(p, 220, 206, 176, detail * 0.8 + (1 - detail) * pampas * 0.2);
-      }
+      grassTexture(p, along, z, foot, detail, seed);
+      const bloom = tileNoise(along * 0.07 + 31, z * 0.4 + 17);
+      const flowers = sprinkle(along, z, 0.12, foot, this.wildflowers * 0.18 * bloom, seed + 19);
+      blendInto(p, 238, 204, 56, flowers * (hash2(Math.floor(along * 3), 7) < 0.7 ? 1 : 0.4));
+      const lilies = sprinkle(
+        along,
+        z,
+        0.16,
+        foot,
+        this.higanbana * 0.3 * smoothstep(0.55, 0.75, bloom),
+        seed + 23,
+      );
+      blendInto(p, 204, 40, 34, lilies);
+      blendInto(p, 236, 214, 60, sprinkle(along, z, 0.2, foot, canola * 0.3, seed + 29));
+      blendInto(p, 220, 206, 176, sprinkle(along, z, 0.3, foot, pampas * 0.22, seed + 31));
       grain(p, along, z, foot, rowFoot, seed);
       return false;
     }
@@ -452,6 +582,7 @@ export class GroundRenderer {
           return true;
         }
         set(p, pr, pg, pb);
+        soilTexture(p, along, z, foot, detail, seed);
         // Rows of rice, perpendicular to the track, visible up close.
         const rows = pulseCoverage(inAlong, 0.3, 0.12, foot);
         const k = (rows - 0.4) * 0.22 * detail;
@@ -461,6 +592,7 @@ export class GroundRenderer {
       } else if (crop < 0.84) {
         // Vegetable ridges.
         set(p, 118, 96, 70);
+        soilTexture(p, along, z, foot, detail, seed);
         const rows = pulseCoverage(inAlong, 1.3, 0.6, foot);
         blendInto(p, gr * 0.9, gg * 0.95, gb * 0.8, rows * 0.75);
       } else if (canola > 0.2 && crop < 0.93) {
@@ -468,6 +600,7 @@ export class GroundRenderer {
         blendInto(p, 238, 214, 58, canola * 0.95);
       } else {
         set(p, gr * 0.95, gg * 0.92, gb * 0.85);
+        grassTexture(p, along, z, foot, detail, seed);
       }
       // Each plot is a slightly different shade.
       const tone = 0.93 + hash3(pa, pl, seed + 5) * 0.14;
@@ -475,6 +608,15 @@ export class GroundRenderer {
       p.g *= tone;
       p.b *= tone;
       blendInto(p, gr * 1.02, gg * 1.02, gb * 0.95, path);
+      // Red spider lilies line the paths between the paddies.
+      blendInto(
+        p,
+        204,
+        40,
+        34,
+        path * sprinkle(along, z, 0.16, foot, this.higanbana * 0.5, seed + 23),
+      );
+      this.plotPath = path;
       grain(p, along, z, foot, rowFoot, seed);
       return false;
     }
@@ -497,10 +639,12 @@ export class GroundRenderer {
     }
     if (use < fields + built + forest) {
       set(p, gr * 0.52, gg * 0.58, gb * 0.5);
+      grassTexture(p, along, z, foot, detail, seed + 3);
       grain(p, along, z, foot, rowFoot, seed);
       return false;
     }
     set(p, gr, gg, gb);
+    grassTexture(p, along, z, foot, detail, seed);
     grain(p, along, z, foot, rowFoot, seed);
     return false;
   }
