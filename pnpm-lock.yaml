@@ -9,10 +9,10 @@ importers:
   .:
     devDependencies:
       typescript:
-        specifier: ~6.0.2
+        specifier: 6.0.3
         version: 6.0.3
       vite:
-        specifier: ^8.3.0
+        specifier: 8.3.0
         version: 8.3.0
 
 packages:
