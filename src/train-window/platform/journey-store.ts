@@ -1,6 +1,6 @@
 import { decodeJourney, encodeJourney, type Journey } from "../sim/journey.ts";
 
-const KEY = "spaceout:train-window:journey";
+const KEY = "bonyari:train-window:journey";
 
 /**
  * The ride saved on this device, or null. Storage may be unavailable (blocked
