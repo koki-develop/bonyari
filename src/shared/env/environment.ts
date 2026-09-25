@@ -8,9 +8,11 @@ import { buildStarField, type Star } from "./stars.ts";
 import {
   type LightningStrike,
   readWeatherSnapshot,
+  USUAL_WEATHER,
   Weather,
   type WeatherKind,
   type WeatherSnapshot,
+  type WeatherTendency,
 } from "./weather.ts";
 
 /** Everything that carries the time, sky and weather on from one moment to the next. */
@@ -55,7 +57,8 @@ export class Environment<S extends SeasonState = SeasonState> {
 
   /**
    * New conditions at `days`, keeping time as `timekeeping` says, with the
-   * weather settled into `weather` or one picked for the season.
+   * weather settled into `weather` or one picked for the season, and leaning
+   * as `tendency` says from then on.
    */
   static create<S extends SeasonState>(
     seed: number,
@@ -63,12 +66,13 @@ export class Environment<S extends SeasonState = SeasonState> {
     timekeeping: Timekeeping,
     seasonOf: (yearFraction: number) => S,
     weather?: WeatherKind,
+    tendency: WeatherTendency = USUAL_WEATHER,
   ): Environment<S> {
     const clock = new Clock(days, timekeeping);
     return new Environment(
       seed,
       clock,
-      Weather.create(seed, seasonOf(clock.yearFraction), weather),
+      Weather.create(seed, seasonOf(clock.yearFraction), weather, tendency),
       seasonOf,
     );
   }
@@ -78,11 +82,12 @@ export class Environment<S extends SeasonState = SeasonState> {
     snapshot: EnvironmentSnapshot,
     timekeeping: Timekeeping,
     seasonOf: (yearFraction: number) => S,
+    tendency: WeatherTendency = USUAL_WEATHER,
   ): Environment<S> {
     return new Environment(
       seed,
       new Clock(snapshot.days, timekeeping),
-      Weather.restore(seed, snapshot.weather),
+      Weather.restore(seed, snapshot.weather, tendency),
       seasonOf,
     );
   }

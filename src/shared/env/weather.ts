@@ -51,6 +51,16 @@ export interface WeatherSnapshot {
   state: Omit<WeatherState, "flash">;
 }
 
+/**
+ * How a work's weather leans: `wet` scales how often rain and storms come
+ * and, a little, how long they last (1 is the usual weather).
+ */
+export interface WeatherTendency {
+  wet: number;
+}
+
+export const USUAL_WEATHER: WeatherTendency = { wet: 1 };
+
 const TARGET_RATE = 1 / 25;
 /** Visibility (m) of clear winter air. */
 const CLEAR_VISIBILITY = 32000;
@@ -67,10 +77,12 @@ export class Weather {
   /** The most recent strike and a count of all strikes, for renderers that may skip frames. */
   lastStrike: LightningStrike | null = null;
   strikeCount = 0;
+  private readonly tendency: WeatherTendency;
 
-  private constructor(seed: number, rng: Rng) {
+  private constructor(seed: number, rng: Rng, tendency: WeatherTendency) {
     this.seed = seed;
     this.rng = rng;
+    this.tendency = tendency;
     this.state = {
       kind: "clear",
       cloudCover: 0,
@@ -87,15 +99,24 @@ export class Weather {
   }
 
   /** Weather settled into `initial`, or into a kind picked for the season. */
-  static create(seed: number, season: SeasonState, initial?: WeatherKind): Weather {
-    const weather = new Weather(seed, new Rng(seed ^ 0x77e7));
+  static create(
+    seed: number,
+    season: SeasonState,
+    initial?: WeatherKind,
+    tendency: WeatherTendency = USUAL_WEATHER,
+  ): Weather {
+    const weather = new Weather(seed, new Rng(seed ^ 0x77e7), tendency);
     weather.setKind(initial ?? weather.chooseKind(season), season);
     weather.snapToTargets(season);
     return weather;
   }
 
-  static restore(seed: number, snapshot: WeatherSnapshot): Weather {
-    const weather = new Weather(seed, new Rng(snapshot.rng));
+  static restore(
+    seed: number,
+    snapshot: WeatherSnapshot,
+    tendency: WeatherTendency = USUAL_WEATHER,
+  ): Weather {
+    const weather = new Weather(seed, new Rng(snapshot.rng), tendency);
     weather.remainingDays = snapshot.remainingDays;
     weather.targetCloud = snapshot.targetCloud;
     weather.targetPrecip = snapshot.targetPrecip;
@@ -131,6 +152,7 @@ export class Weather {
       case "rain":
         this.targetCloud = r.range(0.9, 1);
         this.targetPrecip = r.range(0.35, 1);
+        this.remainingDays *= Math.min(1, 0.5 + 0.5 * this.tendency.wet);
         break;
       case "storm":
         this.targetCloud = 1;
@@ -148,11 +170,12 @@ export class Weather {
     const w = season.warmth;
     const cold = 1 - smoothstep(0.12, 0.3, w);
     const rainySeason = bump(season.yearFraction, 0.3, 0.06, 0.03);
+    const wet = this.tendency.wet;
     return this.rng.weighted<WeatherKind>({
       clear: 4.5,
       cloudy: 2.2,
-      rain: (1.6 + 5 * rainySeason) * (1 - cold * 0.85),
-      storm: 1.6 * season.thunderheads,
+      rain: (1.6 + 5 * rainySeason) * (1 - cold * 0.85) * wet,
+      storm: 1.6 * season.thunderheads * wet,
       snow: 3.2 * cold,
     });
   }
