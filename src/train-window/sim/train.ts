@@ -46,6 +46,23 @@ const DWELL_TIMELINE: readonly (readonly [number, TrainEventType])[] = [
 
 export type TrainPhase = "running" | "braking" | "stopped";
 
+export const TRAIN_PHASES: readonly TrainPhase[] = ["running", "braking", "stopped"];
+
+/** Seconds after arrival while the doors stand open. */
+const DOORS_OPEN_FROM = DWELL_TIMELINE.find(([, type]) => type === "doorOpen")![0];
+const DOORS_OPEN_UNTIL = DWELL_TIMELINE.find(([, type]) => type === "doorClose")![0];
+
+/** The state a train carries from one moment to the next; everything else follows from the route. */
+export interface TrainState {
+  pos: number;
+  speed: number;
+  cruise: number;
+  traction: number;
+  phase: TrainPhase;
+  dwell: number;
+  stationsVisited: number;
+}
+
 export class Train {
   private readonly route: Route;
   private readonly terrain = makeTerrainScratch();
@@ -71,6 +88,40 @@ export class Train {
     this.pos = pos;
     this.cruise = route.terrain(pos, this.terrain).cruise;
     this.speed = this.cruise;
+  }
+
+  /**
+   * A train continuing from `state`, or null when the state doesn't fit the
+   * route: braking with no station ahead, or stopped away from a stop mark.
+   */
+  static restore(route: Route, state: TrainState): Train | null {
+    const train = new Train(route, state.pos);
+    train.speed = state.speed;
+    train.cruise = state.cruise;
+    train.traction = state.traction;
+    train.phase = state.phase;
+    train.dwell = state.dwell;
+    train.stationsVisited = state.stationsVisited;
+    if (state.phase === "braking") {
+      train.station = route.nextStation(state.pos);
+    } else if (state.phase === "stopped") {
+      const station = route.stationAt(state.pos);
+      train.station = station?.stop === state.pos ? station : null;
+      train.doorsOpen = state.dwell >= DOORS_OPEN_FROM && state.dwell < DOORS_OPEN_UNTIL;
+    }
+    return state.phase !== "running" && train.station === null ? null : train;
+  }
+
+  snapshot(): TrainState {
+    return {
+      pos: this.pos,
+      speed: this.speed,
+      cruise: this.cruise,
+      traction: this.traction,
+      phase: this.phase,
+      dwell: this.dwell,
+      stationsVisited: this.stationsVisited,
+    };
   }
 
   update(dt: number): void {

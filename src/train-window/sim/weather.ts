@@ -39,6 +39,17 @@ export interface WeatherState {
   flash: number;
 }
 
+/** Everything that carries the weather on from one moment to the next. */
+export interface WeatherSnapshot {
+  /** Position of the weather's random sequence. */
+  rng: number;
+  remainingDays: number;
+  targetCloud: number;
+  targetPrecip: number;
+  /** The current conditions; a lightning flash is momentary and not kept. */
+  state: Omit<WeatherState, "flash">;
+}
+
 const TARGET_RATE = 1 / 25;
 /** Visibility (m) of clear winter air. */
 const CLEAR_VISIBILITY = 32000;
@@ -56,9 +67,9 @@ export class Weather {
   lastStrike: LightningStrike | null = null;
   strikeCount = 0;
 
-  constructor(seed: number, season: SeasonState, initial?: WeatherKind) {
+  private constructor(seed: number, rng: Rng) {
     this.seed = seed;
-    this.rng = new Rng(seed ^ 0x77e7);
+    this.rng = rng;
     this.state = {
       kind: "clear",
       cloudCover: 0,
@@ -72,8 +83,34 @@ export class Weather {
       wetness: 0,
       flash: 0,
     };
-    this.setKind(initial ?? this.chooseKind(season), season);
-    this.snapToTargets(season);
+  }
+
+  /** Weather settled into `initial`, or into a kind picked for the season. */
+  static create(seed: number, season: SeasonState, initial?: WeatherKind): Weather {
+    const weather = new Weather(seed, new Rng(seed ^ 0x77e7));
+    weather.setKind(initial ?? weather.chooseKind(season), season);
+    weather.snapToTargets(season);
+    return weather;
+  }
+
+  static restore(seed: number, snapshot: WeatherSnapshot): Weather {
+    const weather = new Weather(seed, new Rng(snapshot.rng));
+    weather.remainingDays = snapshot.remainingDays;
+    weather.targetCloud = snapshot.targetCloud;
+    weather.targetPrecip = snapshot.targetPrecip;
+    Object.assign(weather.state, snapshot.state);
+    return weather;
+  }
+
+  snapshot(): WeatherSnapshot {
+    const { flash: _flash, ...state } = this.state;
+    return {
+      rng: this.rng.state,
+      remainingDays: this.remainingDays,
+      targetCloud: this.targetCloud,
+      targetPrecip: this.targetPrecip,
+      state,
+    };
   }
 
   /** Forces a weather kind (used on start and by the dev tools). */

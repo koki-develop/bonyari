@@ -3,9 +3,11 @@ import { DEG } from "../core/math.ts";
 import { computeSky } from "./astro.ts";
 import { Clock, DAYS_PER_YEAR, formatClock } from "./clock.ts";
 import { crossingActive, crossingClosure } from "./crossing.ts";
+import { decodeJourney, encodeJourney } from "./journey.ts";
 import { makeTerrainScratch, Route } from "./route.ts";
 import { computeSeason } from "./season.ts";
-import { DECEL, DWELL, Train } from "./train.ts";
+import { DECEL, DWELL, Train, type TrainEventType, type TrainPhase } from "./train.ts";
+import { World } from "./world.ts";
 
 describe("clock", () => {
   it("formats minutes as HH:MM and wraps at midnight", () => {
@@ -83,8 +85,8 @@ describe("season", () => {
 
 describe("route", () => {
   it("is reproducible from its seed", () => {
-    const a = new Route(42);
-    const b = new Route(42);
+    const a = Route.create(42);
+    const b = Route.create(42);
     a.ensure(40000, 0);
     b.ensure(40000, 0);
     expect(a.sectionsIn(0, 40000).map((s) => [s.kind, s.start, s.end])).toEqual(
@@ -93,7 +95,7 @@ describe("route", () => {
   });
 
   it("keeps structures inside their section and apart from each other", () => {
-    const route = new Route(7);
+    const route = Route.create(7);
     route.ensure(200000, 0);
     for (const s of route.sectionsIn(0, 200000)) {
       const spans = [...s.tunnels, ...s.bridges, ...(s.station ? [s.station] : [])];
@@ -108,7 +110,7 @@ describe("route", () => {
   });
 
   it("blends terrain continuously across section boundaries", () => {
-    const route = new Route(3);
+    const route = Route.create(3);
     route.ensure(100000, 0);
     const t = makeTerrainScratch();
     let prev = route.terrain(0, t).cruise;
@@ -120,7 +122,7 @@ describe("route", () => {
   });
 
   it("pushes the coastline to the horizon where the coast ends", () => {
-    const route = new Route(11, "coast");
+    const route = Route.create(11, "coast");
     route.ensure(50000, 0);
     const t = makeTerrainScratch();
     const first = route.first;
@@ -136,7 +138,7 @@ describe("route", () => {
 
 describe("train", () => {
   it("stops exactly at the station mark, dwells, and departs", () => {
-    const route = new Route(5, "town", "town");
+    const route = Route.create(5, "town", "town");
     route.ensure(60000, 0);
     const station = route.nextStation(0);
     expect(station).not.toBeNull();
@@ -164,7 +166,7 @@ describe("train", () => {
   });
 
   it("never exceeds the braking curve while approaching", () => {
-    const route = new Route(9, "town", "town");
+    const route = Route.create(9, "town", "town");
     route.ensure(60000, 0);
     const station = route.nextStation(0)!;
     const train = new Train(route, station.stop - 600);
@@ -183,5 +185,102 @@ describe("crossing", () => {
     expect(crossingActive(c, 700)).toBe(true);
     expect(crossingClosure(c, 1000)).toBe(1);
     expect(crossingClosure(c, 1300)).toBe(0);
+  });
+});
+
+describe("journey", () => {
+  function sections(route: Route, a: number, b: number) {
+    return route.sectionsIn(a, b).map((s) => [s.index, s.kind, s.start, s.end, s.station?.stop]);
+  }
+
+  it("rebuilds the same line from the oldest kept section", () => {
+    const route = Route.create(21);
+    route.ensure(260000, 180000);
+    expect(route.anchor.index).toBeGreaterThan(0);
+    const rebuilt = new Route(21, route.anchor);
+    rebuilt.ensure(260000, 180000);
+    expect(sections(rebuilt, 0, 260000)).toEqual(sections(route, 0, 260000));
+  });
+
+  /** Runs `a` and `b` side by side and expects them to stay identical. */
+  function expectSameRide(a: World, b: World, seconds: number): void {
+    const events: TrainEventType[][] = [[], []];
+    for (let i = 0; i < 60 * seconds; i++) {
+      a.update(1 / 60);
+      b.update(1 / 60);
+      events[0].push(...a.trainEvents);
+      events[1].push(...b.trainEvents);
+    }
+    expect(b.snapshot()).toEqual(a.snapshot());
+    expect(events[1]).toEqual(events[0]);
+  }
+
+  it.each(["running", "braking", "doorsOpen"] as const)(
+    "resumes a ride saved while %s exactly as it would have gone on",
+    (moment) => {
+      const world = World.create({ seed: 5, section: "town", onlySection: "town" });
+      const at = (): TrainPhase | "doorsOpen" =>
+        world.train.doorsOpen ? "doorsOpen" : world.train.phase;
+      for (let i = 0; i < 60 * 900 && (world.time < 5 || at() !== moment); i++) {
+        world.update(1 / 60);
+      }
+      expect(at()).toBe(moment);
+      const resumed = World.resume(decodeJourney(encodeJourney(world.snapshot()))!)!;
+      expect(resumed.train.doorsOpen).toBe(world.train.doorsOpen);
+      expect(resumed.train.station).toEqual(world.train.station);
+      expectSameRide(world, resumed, 120);
+    },
+  );
+
+  it("resumes far down the line, where the oldest sections were dropped", () => {
+    const world = World.create({ seed: 8 });
+    world.update(3600);
+    expect(world.route.anchor.index).toBeGreaterThan(0);
+    const resumed = World.resume(decodeJourney(encodeJourney(world.snapshot()))!)!;
+    expect(resumed.route.anchor).toEqual(world.route.anchor);
+    expectSameRide(world, resumed, 300);
+  });
+
+  it("refuses records that are malformed or from another format", () => {
+    const text = encodeJourney(World.create({ seed: 3 }).snapshot());
+    expect(decodeJourney(text)).not.toBeNull();
+    expect(decodeJourney("not json")).toBeNull();
+    expect(decodeJourney("null")).toBeNull();
+    const record = JSON.parse(text);
+    expect(decodeJourney(JSON.stringify({ ...record, format: 0 }))).toBeNull();
+    const broken = structuredClone(record);
+    broken.journey.train.phase = "flying";
+    expect(decodeJourney(JSON.stringify(broken))).toBeNull();
+    const missing = structuredClone(record);
+    delete missing.journey.weather.state.snowCover;
+    expect(decodeJourney(JSON.stringify(missing))).toBeNull();
+  });
+
+  it("does not resume a train stopped away from any stop mark", () => {
+    const journey = World.create({ seed: 4 }).snapshot();
+    journey.train = { ...journey.train, phase: "stopped", speed: 0 };
+    expect(World.resume(journey)).toBeNull();
+  });
+});
+
+describe("world", () => {
+  it("keeps every event of a long update", () => {
+    const world = World.create({ seed: 5, section: "town", onlySection: "town" });
+    const events: TrainEventType[] = [];
+    for (let i = 0; i < 40 && !events.includes("depart"); i++) {
+      world.update(30);
+      events.push(...world.trainEvents);
+    }
+    const stop = events.indexOf("brake");
+    expect(events.slice(stop, stop + 8)).toEqual([
+      "brake",
+      "arrive",
+      "airRelease",
+      "doorOpen",
+      "melody",
+      "doorChime",
+      "doorClose",
+      "depart",
+    ]);
   });
 });

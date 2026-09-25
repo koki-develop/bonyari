@@ -9,7 +9,12 @@ import { buildSoundBank, type SoundBank } from "./bank.ts";
 import { chain, filter, gainNode, impulseResponse } from "./synth.ts";
 
 const SPEED_OF_SOUND = 343;
+/** Margin (s) by which events are scheduled ahead of the next update. */
 const LOOKAHEAD = 0.15;
+/** Seconds over which a longer spacing between updates is forgotten once they come faster again. */
+const CADENCE_MEMORY = 5;
+/** Longest update spacing (s) planned for; longer gaps are stalls, not a rhythm to cover. */
+const MAX_CADENCE = 2;
 const MASTER_LEVEL = 0.8;
 /** Lateral distance (m) of the crossing bells from our seat. */
 const BELL_LATERAL = 4;
@@ -73,6 +78,12 @@ export class AudioEngine {
   private readonly lastCall = new Map<readonly AudioBuffer[], number>();
   private wasInTunnel = false;
   private nextCreak = 20;
+  /** Audio time of the previous update. */
+  private lastUpdate = Number.NaN;
+  /** Recent longest spacing (s) between updates on the audio clock. */
+  private cadence = 0;
+  /** How far ahead (s) events are scheduled. */
+  private lookahead = LOOKAHEAD;
 
   constructor(seed: number) {
     this.seed = seed;
@@ -91,9 +102,30 @@ export class AudioEngine {
     this.oncomingPassed.clear();
     this.bells.clear();
     this.wasInTunnel = world.route.tunnelAt(pos) !== null;
+    this.lastUpdate = Number.NaN;
   }
 
-  /** Retries a resume after the system interrupted audio; call from a user gesture. */
+  /**
+   * Schedules far enough ahead to bridge the gap until the next update. A
+   * hidden page updates from a timer, which the browser may slow to one tick a
+   * second.
+   */
+  private trackCadence(now: number): void {
+    const gap = now - this.lastUpdate;
+    if (gap > 0) {
+      this.cadence = Math.min(
+        MAX_CADENCE,
+        Math.max(gap, this.cadence * Math.exp(-gap / CADENCE_MEMORY)),
+      );
+    }
+    this.lastUpdate = now;
+    this.lookahead = LOOKAHEAD + this.cadence;
+  }
+
+  /**
+   * Retries a resume after the system interrupted audio, as phones do while
+   * the page is in the background. Some browsers only allow it from a user gesture.
+   */
   wake(): void {
     const ctx = this.ctx;
     if (ctx && this.enabled && ctx.state !== "running") {
@@ -131,17 +163,6 @@ export class AudioEngine {
           void ctx.suspend();
         }
       }, 600);
-    }
-  }
-
-  /** Pauses while the page is hidden. */
-  pause(): void {
-    void this.ctx?.suspend();
-  }
-
-  resume(): void {
-    if (this.enabled) {
-      void this.ctx?.resume();
     }
   }
 
@@ -332,7 +353,8 @@ export class AudioEngine {
     }
   }
 
-  update(world: World, dt: number): void {
+  /** Follows the world after it advanced by `elapsed` real seconds. */
+  update(world: World, elapsed: number): void {
     const ctx = this.ctx;
     const bank = this.bank;
     if (!ctx || !bank) {
@@ -345,6 +367,10 @@ export class AudioEngine {
       return;
     }
     const now = ctx.currentTime;
+    this.trackCadence(now);
+    // Chance events (birds, drops, creaks) are drawn for one cadence at most:
+    // a stall's worth would all sound at once.
+    const dt = Math.min(elapsed, MAX_CADENCE);
     const train = world.train;
     const route = world.route;
     const v = train.speed;
@@ -454,7 +480,7 @@ export class AudioEngine {
     const bank = this.bank!;
     const train = world.train;
     const v = train.speed;
-    const reach = v * LOOKAHEAD;
+    const reach = v * this.lookahead;
     AXLES.forEach((axle, i) => {
       const p = train.pos + axle.offset;
       const next = Math.floor(p / RAIL_LENGTH) + 1;
@@ -465,12 +491,13 @@ export class AudioEngine {
         this.lastJoint[i] = Math.max(this.lastJoint[i], next - 1);
         return;
       }
-      for (let k = this.lastJoint[i] + 1; k * RAIL_LENGTH - p <= reach; k++) {
+      // Joints already behind the axle were passed during a stall; they no longer sound.
+      for (let k = Math.max(this.lastJoint[i] + 1, next); k * RAIL_LENGTH - p <= reach; k++) {
         this.lastJoint[i] = k;
         if (jointed < 0.5) {
           continue;
         }
-        const when = now + Math.max(0, (k * RAIL_LENGTH - p) / v);
+        const when = now + (k * RAIL_LENGTH - p) / v;
         const gain = axle.gain * 0.3 * Math.min(1, 0.25 + v / 22) * this.rng.range(0.85, 1.1);
         const buffers = bridge ? bank.bridgeJoints : bank.joints;
         const rate = 0.92 + v / 120 + this.rng.range(-0.04, 0.04);
@@ -503,7 +530,9 @@ export class AudioEngine {
         st = { next: now, parity: 0 };
         this.bells.set(c, st);
       }
-      while (st.next < now + LOOKAHEAD) {
+      // Strikes missed during a stall are dropped rather than rung all at once.
+      st.next = Math.max(st.next, now);
+      while (st.next < now + this.lookahead) {
         const dx = c.at - pos;
         const dist = Math.hypot(dx, BELL_LATERAL);
         const approach = (v * dx) / dist;
@@ -579,7 +608,7 @@ export class AudioEngine {
 
   private stationEvents(world: World, now: number): void {
     const bank = this.bank!;
-    for (const e of world.train.events) {
+    for (const e of world.trainEvents) {
       switch (e) {
         case "arrive":
           this.play(bank.stopThunk, now, 0.5, this.trainBus);
@@ -640,7 +669,7 @@ export class AudioEngine {
   private weatherEvents(world: World, now: number, dt: number, shelter: number): void {
     const bank = this.bank!;
     const w = world.weather.state;
-    for (const strike of world.weather.strikes) {
+    for (const strike of world.strikes) {
       const near = strike.distance < 3000;
       const gain = 0.7 * Math.min(1, Math.pow(1500 / strike.distance, 0.7));
       this.play(
@@ -779,7 +808,7 @@ export class AudioEngine {
 
   private fireworks(world: World, now: number): void {
     const bank = this.bank!;
-    for (const shell of world.spectacle.bursts) {
+    for (const shell of world.bursts) {
       const dist = Math.hypot(shell.lateral, shell.height, shell.along - world.train.pos);
       const delay = dist / SPEED_OF_SOUND;
       const gain = 0.5 * Math.min(1, 1500 / dist);

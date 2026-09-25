@@ -119,6 +119,18 @@ export interface Section extends Span {
   crossings: Crossing[];
 }
 
+/**
+ * A section to regenerate the line from. The sections after it depend only on
+ * it and the seed, so a line rebuilt from its oldest kept section is identical.
+ */
+export interface RouteAnchor {
+  index: number;
+  kind: SectionKind;
+  start: number;
+  /** Kind every section is forced to (development aid). */
+  forced: SectionKind | null;
+}
+
 /** Half-length (m) of the transition between neighbouring sections. */
 export const TRANSITION = 280;
 /** Rail elevation (m) on bridges. */
@@ -376,29 +388,44 @@ function buildSection(index: number, kind: SectionKind, start: number, seed: num
   return { index, kind, start, end, seed, terrain, tunnels, bridges, station, crossings };
 }
 
+/** Offsets of the sections searched around a position: its own, then the next, then the previous. */
+const NEAR = [0, 1, -1] as const;
+
 /**
  * The endless line. Sections are generated lazily from a seed so any stretch of
  * track is reproducible; queries are pure functions of the along-track position.
  */
-/** Offsets of the sections searched around a position: its own, then the next, then the previous. */
-const NEAR = [0, 1, -1] as const;
-
 export class Route {
   private readonly seed: number;
   private readonly sections: Section[] = [];
   private readonly forced: SectionKind | null;
 
-  constructor(
+  /** Rebuilds the line from `anchor` onwards; the sections after it follow from the seed. */
+  constructor(seed: number, anchor: RouteAnchor) {
+    this.seed = seed;
+    this.forced = anchor.forced;
+    this.sections.push(
+      buildSection(anchor.index, anchor.kind, anchor.start, this.sectionSeed(anchor.index)),
+    );
+  }
+
+  /** A new line starting at 0, with `firstKind` (or a seeded pick) as its first section. */
+  static create(
     seed: number,
     firstKind: SectionKind | null = null,
     forced: SectionKind | null = null,
-  ) {
-    this.seed = seed;
-    this.forced = forced;
-    const r = new Rng(seed);
+  ): Route {
     const kind =
-      forced ?? firstKind ?? r.pick<SectionKind>(["countryside", "town", "mountain", "coast"]);
-    this.sections.push(buildSection(0, kind, 0, this.sectionSeed(0)));
+      forced ??
+      firstKind ??
+      new Rng(seed).pick<SectionKind>(["countryside", "town", "mountain", "coast"]);
+    return new Route(seed, { index: 0, kind, start: 0, forced });
+  }
+
+  /** Where this line can be rebuilt from: its oldest kept section. */
+  get anchor(): RouteAnchor {
+    const { index, kind, start } = this.sections[0];
+    return { index, kind, start, forced: this.forced };
   }
 
   private sectionSeed(index: number): number {
