@@ -75,8 +75,6 @@ const WINTER_REST = [0.79, 0.92] as const;
 export const LEAVE_TIME = 2.5;
 /** Food (units) a worker eats in a day. */
 const RATION = 0.008;
-/** Most crumbs that may lie on the ground at once. */
-const MAX_CRUMBS = 10;
 
 export interface WorldOptions {
   seed: number;
@@ -492,10 +490,9 @@ export class World {
     return xs;
   }
 
-  /** Drops a crumb from height `y` over x, if there is room on the ground for another. */
+  /** Drops a crumb from height `y` over x; false if x is off the ground the ants walk. */
   dropCrumb(x: number, y: number): boolean {
-    const crumbs = this.items.filter((i) => i.kind === "crumb").length;
-    if (crumbs >= MAX_CRUMBS || x < SURFACE_X0 + 5 || x > SURFACE_X1 - 5) {
+    if (x < SURFACE_X0 + 5 || x > SURFACE_X1 - 5) {
       return false;
     }
     const size = this.rng.range(2.6, 4.6);

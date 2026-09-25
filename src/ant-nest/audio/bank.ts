@@ -71,8 +71,8 @@ function puff(
 const bite: Build = (ctx, noise, r) => {
   const out = ctx.createGain();
   out.connect(ctx.destination);
-  puff(ctx, noise, out, 0, "bandpass", r.range(900, 1500), 0.012, 0.09, 0.6, r.next());
-  puff(ctx, noise, out, 0.01, "lowpass", r.range(220, 320), 0.01, 0.05, 0.8, r.next());
+  puff(ctx, noise, out, 0, "bandpass", r.range(600, 1000), 0.03, 0.09, 0.5, r.next());
+  puff(ctx, noise, out, 0.01, "lowpass", r.range(220, 320), 0.02, 0.05, 0.8, r.next());
 };
 
 /** A pellet landing on the heap: a soft knock, and the loose soil hushing down its side. */
@@ -128,7 +128,7 @@ function whirr(ctx: BaseAudioContext, seed: number): AudioBuffer {
     const swell = Math.min(1, t / 0.15) * Math.min(1, (1.4 - t) / 0.6);
     data[i] = band * pump * swell;
   }
-  return normalize(buffer, 0.8);
+  return normalize(buffer);
 }
 
 /** Wings snapped off, a cocoon torn open: a faint, dry rustle. */
@@ -169,7 +169,10 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
       shots(3, 0.15, insect),
       shots(4, 0.4, rustle),
       shots(6, 0.3, thud),
-      Promise.all([render(9, thunder(true)), render(9, thunder(false))]),
+      Promise.all([
+        render(9, thunder(true)).then(normalize),
+        render(9, thunder(false)).then(normalize),
+      ]),
       renderWildlife(render),
     ]);
   return {

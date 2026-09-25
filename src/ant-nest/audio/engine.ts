@@ -12,6 +12,26 @@ const SPEED_OF_SOUND = 343;
 const EAR = { x: 0, y: -70 };
 /** What lives around the ground: a lawn by a wood, a few houses. */
 const HABITAT = { rural: 0.8, houses: 0.25, fields: 0.3 } as const;
+/**
+ * How loud (peak, before the master) each one-shot is when it happens right
+ * by the ear: a little above the hush of the ground, never a jolt. Thunder
+ * alone is allowed to be loud.
+ */
+const PEAK = {
+  bite: 0.045,
+  drop: 0.05,
+  pack: 0.035,
+  crumb: 0.08,
+  insect: 0.05,
+  touchdown: 0.04,
+  shed: 0.05,
+  eclose: 0.02,
+  takeoff: 0.06,
+  thud: 0.05,
+  thunder: 0.3,
+} as const;
+/** The peak every one-shot of the bank is brought to (see `normalize`). */
+const BANK_PEAK = 0.9;
 /** Loudness of the rustle of one ant walking right by the ear. */
 const RUSTLE = 0.01;
 
@@ -129,42 +149,49 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
       const now = start + r.next() * dt;
       switch (e.kind) {
         case "bite":
-          this.play(
+          this.shot(
             r.pick(bank.bite),
             now,
-            0.25 * gain * (0.8 + 0.3 * e.hardness),
+            PEAK.bite * gain * (0.8 + 0.2 * e.hardness),
             this.near,
             pan,
             r.range(0.9, 1.12),
           );
           break;
         case "dump":
-          this.play(r.pick(bank.drop), now, 0.16 * gain, this.ground, pan, r.range(0.9, 1.1));
+          this.shot(r.pick(bank.drop), now, PEAK.drop * gain, this.ground, pan, r.range(0.9, 1.1));
           break;
         case "pack":
-          this.play(r.pick(bank.pack), now, 0.2 * gain, this.near, pan, r.range(0.9, 1.1));
+          this.shot(r.pick(bank.pack), now, PEAK.pack * gain, this.near, pan, r.range(0.9, 1.1));
           break;
         case "land":
-          this.play(
+          this.shot(
             r.pick(e.item === "crumb" ? bank.crumb : bank.insect),
             now,
-            (e.item === "crumb" ? 0.3 : 0.18) * gain * clamp01(e.size / 4),
+            (e.item === "crumb" ? PEAK.crumb : PEAK.insect) * gain * clamp01(e.size / 4),
             this.ground,
             pan,
             r.range(0.92, 1.08),
           );
           break;
         case "touchdown":
-          this.play(r.pick(bank.insect), now, 0.2 * gain, this.ground, pan);
+          this.shot(r.pick(bank.insect), now, PEAK.touchdown * gain, this.ground, pan);
           break;
         case "shed":
-          this.play(r.pick(bank.rustle), now, 0.22 * gain, this.near, pan);
+          this.shot(r.pick(bank.rustle), now, PEAK.shed * gain, this.near, pan);
           break;
         case "eclose":
-          this.play(r.pick(bank.rustle), now, 0.1 * gain, this.near, pan, r.range(1.1, 1.3));
+          this.shot(
+            r.pick(bank.rustle),
+            now,
+            PEAK.eclose * gain,
+            this.near,
+            pan,
+            r.range(1.1, 1.3),
+          );
           break;
         case "takeoff":
-          this.play(bank.whirr, now, 0.12 * gain, this.above, pan, r.range(0.92, 1.08));
+          this.shot(bank.whirr, now, PEAK.takeoff * gain, this.above, pan, r.range(0.92, 1.08));
           break;
         case "lay":
           break;
@@ -194,6 +221,18 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
     this.feetPan.pan.setTargetAtTime(pan, now, 0.8);
   }
 
+  /** Plays a one-shot of the bank through `bus` so that its peak comes out at `peak`. */
+  private shot(
+    buffer: AudioBuffer,
+    when: number,
+    peak: number,
+    bus: GainNode,
+    pan = 0,
+    rate = 1,
+  ): void {
+    this.play(buffer, when, peak / (BANK_PEAK * bus.gain.value), bus, pan, rate);
+  }
+
   private weather(world: World, bank: SoundBank, now: number, dt: number): void {
     const r = this.rng;
     const w = world.env.weather.state;
@@ -202,10 +241,10 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
       if (n < 1 && !r.chance(n)) {
         break;
       }
-      this.play(
+      this.shot(
         r.pick(bank.thud),
         now + r.next() * dt,
-        r.range(0.05, 0.16) * w.rain,
+        PEAK.thud * r.range(0.4, 1) * w.rain,
         this.ground,
         r.range(-0.8, 0.8),
         r.range(0.85, 1.15),
@@ -213,8 +252,8 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
     }
     for (const strike of world.env.strikes) {
       const near = strike.distance < 3000;
-      const gain = 0.6 * Math.min(1, Math.pow(1500 / strike.distance, 0.7));
-      this.play(
+      const gain = PEAK.thunder * Math.min(1, Math.pow(1500 / strike.distance, 0.7));
+      this.shot(
         near ? bank.thunder[0] : bank.thunder[1],
         now + strike.distance / SPEED_OF_SOUND,
         gain,
