@@ -1,6 +1,7 @@
-import { hex, mix, type RGB } from "../../core/color.ts";
-import { Rng } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
+import { hex, mix, type RGB } from "../../../shared/core/color.ts";
+import { Rng } from "../../../shared/core/random.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 
 const SKINS: readonly RGB[] = ["#e6c2a2", "#dcb294", "#c99c7c", "#efcfb4"].map(hex);
 const HAIR: readonly RGB[] = ["#1c1a1a", "#2e2420", "#4a3a2e", "#8a8680", "#b8b4ae"].map(hex);
@@ -62,10 +63,10 @@ interface Figure {
 }
 
 /** Picks a person's look from `seed`, dressed for the season and the weather. */
-function figure(p: Painter, seed: number): Figure {
+function figure(p: Painter<Camera>, seed: number): Figure {
   const r = new Rng(seed);
-  const warmth = p.world.season.warmth;
-  const rain = p.world.weather.state.rain;
+  const warmth = p.env.season.warmth;
+  const rain = p.env.weather.state.rain;
   const child = r.chance(0.08);
   const old = !child && r.chance(0.15);
   const cold = warmth < 0.35;
@@ -193,7 +194,13 @@ function bodyAt(f: Figure, t: number, u: number, seated: boolean): RGB | null {
  * floor `floor` m above the rails, drawn at the painter's current distance.
  * They keep still: only the light of a phone or an umbrella above them.
  */
-export function drawPerson(p: Painter, along: number, floor: number, seed: number, seat = 0): void {
+export function drawPerson(
+  p: Painter<Camera>,
+  along: number,
+  floor: number,
+  seed: number,
+  seat = 0,
+): void {
   const f = figure(p, seed);
   const s = p.s;
   const seated = seat > 0;

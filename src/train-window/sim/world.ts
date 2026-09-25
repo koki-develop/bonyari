@@ -1,21 +1,21 @@
-import { clamp01, smoothstep } from "../core/math.ts";
-import { Rng } from "../core/random.ts";
-import { computeSky, type SkyState } from "./astro.ts";
-import { Clock, DAYS_PER_YEAR } from "./clock.ts";
+import { Rng } from "../../shared/core/random.ts";
+import { DAYS_PER_YEAR, type Timekeeping } from "../../shared/env/clock.ts";
+import { Environment } from "../../shared/env/environment.ts";
+import type { WeatherKind } from "../../shared/env/weather.ts";
+import { Fireworks, type Shell } from "./fireworks.ts";
 import type { Journey } from "./journey.ts";
 import { Route, type SectionKind, TRANSITION } from "./route.ts";
-import { computeSeason, type SeasonState } from "./season.ts";
-import { type Shell, Spectacle } from "./spectacle.ts";
-import { buildStarField, type Star } from "./stars.ts";
+import { computeRouteSeason, type RouteSeason } from "./season.ts";
 import { Traffic } from "./traffic.ts";
 import { Train, type TrainEventType } from "./train.ts";
-import { type LightningStrike, Weather, type WeatherKind } from "./weather.ts";
 
 /**
  * Route generated (and kept) this far (m) on both sides of the train: the
  * farthest ridge sees about 30 km along the line, plus its terrain filter.
  */
 const ROUTE_REACH = 45000;
+/** Time on the train: a day lasts five real minutes, and the year turns. */
+export const TIMEKEEPING: Timekeeping = { secondsPerDay: 300, timeOfYear: null };
 /** Longest single integration step (s); longer updates are split into steps this long. */
 const MAX_STEP = 0.1;
 
@@ -35,52 +35,44 @@ export interface WorldOptions {
 /** Everything that happens outside the window, advanced in real seconds. */
 export class World {
   readonly seed: number;
-  readonly clock: Clock;
+  /** Time, sky and weather. */
+  readonly env: Environment<RouteSeason>;
   readonly route: Route;
   readonly train: Train;
-  readonly weather: Weather;
   readonly traffic: Traffic;
-  readonly spectacle: Spectacle;
-  readonly stars: readonly Star[];
-  season: SeasonState;
-  sky: SkyState;
+  readonly fireworks: Fireworks;
   /** Real seconds simulated so far. */
   time = 0;
   /** Train events fired during the last update. */
   readonly trainEvents: TrainEventType[] = [];
-  /** Lightning strikes during the last update. */
-  readonly strikes: LightningStrike[] = [];
   /** Firework shells that burst during the last update. */
   readonly bursts: Shell[] = [];
 
-  private constructor(seed: number, clock: Clock, route: Route, train: Train, weather: Weather) {
+  private constructor(seed: number, env: Environment<RouteSeason>, route: Route, train: Train) {
     this.seed = seed;
-    this.clock = clock;
+    this.env = env;
     this.route = route;
     this.train = train;
-    this.weather = weather;
-    this.season = computeSeason(clock.yearFraction);
-    this.sky = computeSky(clock.calendarDayOfYear, clock.hour, clock.days);
     this.traffic = new Traffic(route, seed);
-    this.spectacle = new Spectacle(seed);
-    this.stars = buildStarField(seed);
+    this.fireworks = new Fireworks(seed);
   }
 
   /** A new ride: 23:00 on a random day unless the options say otherwise. */
   static create(options: WorldOptions): World {
     const rng = new Rng(options.seed);
     const day = options.day ?? Math.floor(rng.next() * DAYS_PER_YEAR);
-    const clock = new Clock(day + (options.minute ?? 23 * 60) / 1440);
     const route = Route.create(options.seed, options.section ?? null, options.onlySection ?? null);
     // Start well inside the first section, away from its structures.
     const start = route.first.start + TRANSITION + 120;
     route.ensure(start + ROUTE_REACH, start - ROUTE_REACH);
-    const weather = Weather.create(
+    const env = Environment.create(
       options.seed,
-      computeSeason(clock.yearFraction),
+      day + (options.minute ?? 23 * 60) / 1440,
+      TIMEKEEPING,
+      computeRouteSeason,
       options.weather,
     );
-    return new World(options.seed, clock, route, new Train(route, start), weather);
+    return new World(options.seed, env, route, new Train(route, start));
   }
 
   /** The ride `journey` was taken from, or null when its train doesn't fit the route. */
@@ -92,26 +84,25 @@ export class World {
     if (!train) {
       return null;
     }
-    const weather = Weather.restore(journey.seed, journey.weather);
-    return new World(journey.seed, new Clock(journey.days), route, train, weather);
+    const env = Environment.restore(journey.seed, journey, TIMEKEEPING, computeRouteSeason);
+    return new World(journey.seed, env, route, train);
   }
 
   /** Where the ride is now, enough to resume it with `World.resume`. */
   snapshot(): Journey {
     return {
       seed: this.seed,
-      days: this.clock.days,
+      ...this.env.snapshot(),
       route: this.route.anchor,
       train: this.train.snapshot(),
-      weather: this.weather.snapshot(),
     };
   }
 
   /** Advances by `dt` real seconds, in steps no longer than `MAX_STEP`. */
   update(dt: number): void {
     this.trainEvents.length = 0;
-    this.strikes.length = 0;
     this.bursts.length = 0;
+    this.env.clearEvents();
     const steps = Math.ceil(dt / MAX_STEP);
     for (let i = 0; i < steps; i++) {
       this.step(dt / steps);
@@ -120,32 +111,14 @@ export class World {
 
   private step(dt: number): void {
     this.time += dt;
-    const daysBefore = this.clock.days;
-    this.clock.advance(dt);
-    const worldDt = this.clock.days - daysBefore;
-    this.season = computeSeason(this.clock.yearFraction);
-    this.sky = computeSky(this.clock.calendarDayOfYear, this.clock.hour, this.clock.days);
-    this.weather.update(dt, worldDt, this.clock.days, this.clock.hour, this.season);
+    const env = this.env;
+    env.step(dt);
     this.train.update(dt);
     const pos = this.train.pos;
     this.route.ensure(pos + ROUTE_REACH, pos - ROUTE_REACH);
-    this.traffic.update(dt, pos, this.train.speed, this.clock.hour, pos - 600, pos + 600);
-    this.spectacle.update(
-      dt,
-      this.clock.days,
-      this.clock.hour,
-      pos,
-      this.season,
-      this.darkness,
-      clamp01(1 - this.weather.state.cloudCover * 1.3),
-    );
+    this.traffic.update(dt, pos, this.train.speed, env.clock.hour, pos - 600, pos + 600);
+    this.fireworks.update(dt, env.clock.days, env.clock.hour, pos, env.season);
     this.trainEvents.push(...this.train.events);
-    this.strikes.push(...this.weather.strikes);
-    this.bursts.push(...this.spectacle.bursts);
-  }
-
-  /** 1 at full night, 0 in daylight. */
-  get darkness(): number {
-    return smoothstep(-4, -14, this.sky.sunAltitude);
+    this.bursts.push(...this.fireworks.bursts);
   }
 }

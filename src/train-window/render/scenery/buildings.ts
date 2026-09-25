@@ -1,7 +1,8 @@
-import { hex, mix, type RGB } from "../../core/color.ts";
-import { mod } from "../../core/math.ts";
-import { hash3, Rng } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
+import { hex, mix, type RGB } from "../../../shared/core/color.ts";
+import { mod } from "../../../shared/core/math.ts";
+import { hash3, Rng } from "../../../shared/core/random.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 import {
   acUnit,
   antenna,
@@ -110,7 +111,7 @@ function shutterBox(f: Frame, x0: number, x1: number, h0: number, h1: number, co
   f.p.rect(px(f, x0), py(f, h1), px(f, x1), py(f, h0), color);
 }
 
-export function drawHouse(p: Painter, o: Scenery): void {
+export function drawHouse(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -129,7 +130,7 @@ export function drawHouse(p: Painter, o: Scenery): void {
   const fh = 2.8;
   const plinth = 0.45;
   const wallTop = floors * fh + plinth;
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const half = W / 2;
 
@@ -192,7 +193,7 @@ export function drawHouse(p: Painter, o: Scenery): void {
   // Openings, floor by floor.
   const frame = r.chance(0.6) ? "silver" : "bronze";
   const nightShutters =
-    hash3(o.seed, 5, 5) < 0.55 && (p.world.clock.hour > 22 || p.world.clock.hour < 5.5);
+    hash3(o.seed, 5, 5) < 0.55 && (p.env.clock.hour > 22 || p.env.clock.hour < 5.5);
   let index = 0;
   let doorX = 0;
   for (let floor = 0; floor < floors; floor++) {
@@ -328,7 +329,7 @@ export function drawHouse(p: Painter, o: Scenery): void {
   );
 }
 
-export function drawApartment(p: Painter, o: Scenery): void {
+export function drawApartment(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   if (r.chance(0.4)) {
@@ -339,7 +340,7 @@ export function drawApartment(p: Painter, o: Scenery): void {
 }
 
 /** A two-storey wooden "apaato" seen from its open walkway side, with steel stairs. */
-function drawWoodenApartment(p: Painter, o: Scenery, r: Rng): void {
+function drawWoodenApartment(p: Painter<Camera>, o: Scenery, r: Rng): void {
   const s = p.s;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const W = r.range(14, 22);
@@ -347,7 +348,7 @@ function drawWoodenApartment(p: Painter, o: Scenery, r: Rng): void {
   const fh = 2.8;
   const units = Math.max(3, Math.floor(W / 4.6));
   const color = r.pick(SIDING);
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   const top = 2 * fh + 0.3;
   if (W * s < 6) {
     p.rect(px(f, -half), py(f, top), px(f, half), py(f, 0), color);
@@ -419,7 +420,7 @@ function drawWoodenApartment(p: Painter, o: Scenery, r: Rng): void {
 }
 
 /** A reinforced-concrete block of flats, balcony side. */
-function drawMansion(p: Painter, o: Scenery, r: Rng): void {
+function drawMansion(p: Painter<Camera>, o: Scenery, r: Rng): void {
   const s = p.s;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const floors = r.int(3, 7);
@@ -432,7 +433,7 @@ function drawMansion(p: Painter, o: Scenery, r: Rng): void {
   const units = Math.max(2, Math.round(W / unitW));
   const uw = W / units;
   const glassRail = r.chance(0.5);
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   if (W * s < 6) {
     p.rect(px(f, -half), py(f, H), px(f, half), py(f, 0), color);
     for (let fl = 0; fl < floors; fl++) {
@@ -516,7 +517,7 @@ function drawMansion(p: Painter, o: Scenery, r: Rng): void {
   }
 }
 
-export function drawShop(p: Painter, o: Scenery): void {
+export function drawShop(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   if (r.chance(0.55)) {
@@ -527,7 +528,7 @@ export function drawShop(p: Painter, o: Scenery): void {
 }
 
 /** A convenience store: a lit glass front with shelves inside and a sign on a pole. */
-function drawConvenienceStore(p: Painter, o: Scenery, r: Rng): void {
+function drawConvenienceStore(p: Painter<Camera>, o: Scenery, r: Rng): void {
   const s = p.s;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const W = r.range(12, 15);
@@ -612,7 +613,7 @@ function drawConvenienceStore(p: Painter, o: Scenery, r: Rng): void {
 }
 
 /** A family shop: shutters down at night, an awning and goods out by day, home upstairs. */
-function drawCornerShop(p: Painter, o: Scenery, r: Rng): void {
+function drawCornerShop(p: Painter<Camera>, o: Scenery, r: Rng): void {
   const s = p.s;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const W = r.range(6.5, 9);
@@ -620,8 +621,8 @@ function drawCornerShop(p: Painter, o: Scenery, r: Rng): void {
   const fh = 3.1;
   const H = 2 * fh + 0.3;
   const wallColor = r.pick(STUCCO);
-  const snow = p.world.weather.state.snowCover;
-  const hour = p.world.clock.hour;
+  const snow = p.env.weather.state.snowCover;
+  const hour = p.env.clock.hour;
   const open = hour > 9 && hour < 19.5;
   wall(f, -half, half, 0, H, r.pick<WallKind>(["stucco", "tile"]), wallColor);
   const a = Math.round(px(f, -half + 0.3));
@@ -668,7 +669,7 @@ function drawCornerShop(p: Painter, o: Scenery, r: Rng): void {
   }
 }
 
-export function drawFactory(p: Painter, o: Scenery): void {
+export function drawFactory(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -677,7 +678,7 @@ export function drawFactory(p: Painter, o: Scenery): void {
   const half = W / 2;
   const H = r.range(7, 11);
   const wallColor = r.pick(["#9aa2a8", "#b4ada0", "#8f9aa0", "#c4c0b4"].map(hex));
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   // Corrugated siding.
   const a = Math.round(px(f, -half));
   const b = Math.round(px(f, half));
@@ -768,14 +769,14 @@ export function drawFactory(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawBarn(p: Painter, o: Scenery): void {
+export function drawBarn(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
   const f: Frame = { p, cx: p.x(o.along), s, seed: o.seed };
   const W = r.range(5, 9);
   const half = W / 2;
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   wall(f, -half, half, 0, 2.8, "boards", r.pick(BOARDS));
   // An open bay, dark inside, with a glimpse of tools and straw.
   const bx = r.range(-half + 0.4, half - 2.4);
@@ -794,11 +795,11 @@ export function drawBarn(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawVending(p: Painter, o: Scenery): void {
+export function drawVending(p: Painter<Camera>, o: Scenery): void {
   vendingMachine(p, o.along, o.lateral, 0, o.seed, false);
 }
 
-export function drawHighrise(p: Painter, o: Scenery): void {
+export function drawHighrise(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -844,13 +845,13 @@ export function drawHighrise(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawCluster(p: Painter, o: Scenery): void {
+export function drawCluster(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
   const count = r.int(3, 9);
   const base = Math.round(p.y(0));
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   for (let i = 0; i < count; i++) {
     const a = o.along + r.range(-35, 35);
     const w = Math.max(2, Math.round(r.range(6, 12) * s));
@@ -882,7 +883,7 @@ export function drawCluster(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawGreenhouse(p: Painter, o: Scenery): void {
+export function drawGreenhouse(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -920,7 +921,7 @@ export function drawGreenhouse(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawShrine(p: Painter, o: Scenery): void {
+export function drawShrine(p: Painter<Camera>, o: Scenery): void {
   p.at(o.lateral);
   const s = p.s;
   const cx = p.x(o.along);
@@ -956,7 +957,7 @@ export function drawShrine(p: Painter, o: Scenery): void {
   );
 }
 
-export function drawDryingRack(p: Painter, o: Scenery): void {
+export function drawDryingRack(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;

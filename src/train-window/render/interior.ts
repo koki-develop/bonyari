@@ -1,7 +1,7 @@
-import { hex, pack, type RGB } from "../core/color.ts";
-import { smoothstep } from "../core/math.ts";
-import { hash2 } from "../core/random.ts";
-import { Surface } from "../core/surface.ts";
+import { hex, pack, type RGB } from "../../shared/core/color.ts";
+import { smoothstep } from "../../shared/core/math.ts";
+import { hash2 } from "../../shared/core/random.ts";
+import { Surface } from "../../shared/core/surface.ts";
 import { drawTableClock, TABLE_CLOCK_WIDTH } from "./clock-display.ts";
 import type { Layout, Rect } from "./layout.ts";
 

@@ -1,5 +1,5 @@
-import { bump } from "../core/math.ts";
-import { Rng } from "../core/random.ts";
+import { bump } from "../../shared/core/math.ts";
+import { Rng } from "../../shared/core/random.ts";
 import { makeTerrainScratch, type Route } from "./route.ts";
 
 export type CarKind = "car" | "kei" | "van" | "bus";

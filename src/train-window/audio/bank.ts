@@ -1,4 +1,4 @@
-import { Rng } from "../core/random.ts";
+import { Rng } from "../../shared/core/random.ts";
 import {
   type Build,
   chain,
@@ -7,8 +7,11 @@ import {
   noiseBuffer,
   noiseBurst,
   renderOffline,
-} from "./synth.ts";
-import * as calls from "./wildlife.ts";
+  struck,
+  tone,
+} from "../../shared/audio/synth.ts";
+import { dropTick, thunder } from "../../shared/audio/weather-sounds.ts";
+import { renderWildlife, type Wildlife } from "../../shared/audio/wildlife.ts";
 
 /** Every one-shot sound, synthesized once when the ride starts. */
 export interface SoundBank {
@@ -31,51 +34,6 @@ export interface SoundBank {
   wildlife: Wildlife;
   creaks: AudioBuffer[];
   noise: { white: AudioBuffer; pink: AudioBuffer; brown: AudioBuffer };
-}
-
-export interface Wildlife {
-  uguisu: AudioBuffer[];
-  sparrow: AudioBuffer[];
-  hiyodori: AudioBuffer[];
-  shijukara: AudioBuffer[];
-  crow: AudioBuffer[];
-  frog: AudioBuffer[];
-  suzumushi: AudioBuffer[];
-  korogi: AudioBuffer[];
-  matsumushi: AudioBuffer[];
-  minmin: AudioBuffer[];
-  higurashi: AudioBuffer[];
-  tsukutsukuboshi: AudioBuffer[];
-}
-
-function tone(
-  ctx: BaseAudioContext,
-  type: OscillatorType,
-  freq: number,
-  start: number,
-  stop: number,
-): OscillatorNode {
-  const o = ctx.createOscillator();
-  o.type = type;
-  o.frequency.setValueAtTime(freq, start);
-  o.start(start);
-  o.stop(stop);
-  return o;
-}
-
-/** A struck note: partials with individual decays, like a bell or a marimba bar. */
-function strike(
-  ctx: BaseAudioContext,
-  out: AudioNode,
-  freq: number,
-  start: number,
-  partials: readonly (readonly [number, number, number])[],
-): void {
-  for (const [ratio, amp, decay] of partials) {
-    const o = tone(ctx, "sine", freq * ratio, start, start + decay * 5);
-    const g = envelope(ctx, start, 0.002, decay, amp);
-    chain(o, g, out);
-  }
 }
 
 const MARIMBA = [
@@ -147,17 +105,17 @@ const crossingBell: Build = (ctx) => {
   const out = ctx.createGain();
   out.gain.value = 0.8;
   out.connect(ctx.destination);
-  strike(ctx, out, 760, 0, BELL);
+  struck(ctx, out, 760, 0, BELL);
 };
 
 const chimeOpen: Build = (ctx) => {
   const speaker = filter(ctx, "bandpass", 1800, 0.5);
   speaker.connect(ctx.destination);
-  strike(ctx, speaker, midi(88), 0, [
+  struck(ctx, speaker, midi(88), 0, [
     [1, 0.6, 0.5],
     [2, 0.12, 0.2],
   ]);
-  strike(ctx, speaker, midi(84), 0.42, [
+  struck(ctx, speaker, midi(84), 0.42, [
     [1, 0.6, 1.3],
     [2, 0.12, 0.4],
   ]);
@@ -167,7 +125,7 @@ const chimeClose: Build = (ctx) => {
   const speaker = filter(ctx, "bandpass", 1800, 0.5);
   speaker.connect(ctx.destination);
   for (let i = 0; i < 6; i++) {
-    strike(ctx, speaker, midi(i % 2 === 0 ? 86 : 81), i * 0.3, [
+    struck(ctx, speaker, midi(i % 2 === 0 ? 86 : 81), i * 0.3, [
       [1, 0.45, 0.28],
       [2, 0.08, 0.12],
     ]);
@@ -214,7 +172,7 @@ const melody: Build = (ctx) => {
   ];
   let t = 0.05;
   for (const [note, beats] of tune) {
-    strike(ctx, out, midi(note), t, MARIMBA);
+    struck(ctx, out, midi(note), t, MARIMBA);
     t += beats * beat;
   }
   const chords: readonly (readonly number[])[] = [
@@ -282,36 +240,6 @@ const stopThunk: Build = (ctx, noise, r) => {
   );
 };
 
-const thunder =
-  (near: boolean): Build =>
-  (ctx, noise, r) => {
-    const out = ctx.createGain();
-    out.connect(ctx.destination);
-    if (near) {
-      chain(
-        noiseBurst(ctx, noise, 0, 0.4, r.next()),
-        filter(ctx, "highpass", 900),
-        envelope(ctx, 0, 0.002, 0.25, 0.6),
-        out,
-      );
-    }
-    // Rolling rumble: several overlapping swells.
-    for (let i = 0; i < 7; i++) {
-      const start = (near ? 0.05 : 0.2) + i * r.range(0.35, 0.9);
-      const dur = r.range(1.2, 2.8);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, start);
-      g.gain.linearRampToValueAtTime(r.range(0.3, 0.8) * (1 - i * 0.1), start + r.range(0.1, 0.4));
-      g.gain.setTargetAtTime(0, start + 0.4, dur / 3);
-      chain(
-        noiseBurst(ctx, noise, start, dur + 1.5, r.next()),
-        filter(ctx, "lowpass", near ? 420 : 220),
-        g,
-        out,
-      );
-    }
-  };
-
 const fireworkBoom =
   (variant: number): Build =>
   (ctx, noise, r) => {
@@ -337,17 +265,6 @@ const crackle: Build = (ctx, noise, r) => {
     );
   }
 };
-
-const dropTick =
-  (variant: number): Build =>
-  (ctx, noise, r) => {
-    chain(
-      noiseBurst(ctx, noise, 0, 0.04, r.next()),
-      filter(ctx, "bandpass", 2600 + variant * 1300, 3),
-      envelope(ctx, 0, 0.001, 0.012, 0.8),
-      ctx.destination,
-    );
-  };
 
 const click: Build = (ctx, noise, r) => {
   chain(
@@ -450,53 +367,5 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     creaks,
     wildlife,
     noise: { white, pink, brown },
-  };
-}
-
-async function renderWildlife(
-  render: (seconds: number, build: Build) => Promise<AudioBuffer>,
-): Promise<Wildlife> {
-  const many = (count: number, seconds: number, build: Build) =>
-    Promise.all(Array.from({ length: count }, () => render(seconds, build)));
-  const [
-    uguisu,
-    sparrow,
-    hiyodori,
-    shijukara,
-    crow,
-    frog,
-    suzumushi,
-    korogi,
-    matsumushi,
-    minmin,
-    higurashi,
-    tsukutsukuboshi,
-  ] = await Promise.all([
-    Promise.all([0, 0, 1, 1, 2, 3].map((v) => render(3.2, calls.uguisu(v)))),
-    many(6, 1.8, calls.sparrow),
-    many(4, 3.8, calls.hiyodori),
-    many(4, 2.8, calls.shijukara),
-    many(4, 4, calls.crow),
-    many(8, 1.5, calls.frog),
-    many(5, 2.8, calls.suzumushi),
-    many(5, 3.2, calls.korogi),
-    many(3, 2.6, calls.matsumushi),
-    many(4, 5.2, calls.minmin),
-    many(4, 3.2, calls.higurashi),
-    many(3, 6.2, calls.tsukutsukuboshi),
-  ]);
-  return {
-    uguisu,
-    sparrow,
-    hiyodori,
-    shijukara,
-    crow,
-    frog,
-    suzumushi,
-    korogi,
-    matsumushi,
-    minmin,
-    higurashi,
-    tsukutsukuboshi,
   };
 }

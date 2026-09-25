@@ -16,16 +16,8 @@ export function pack(r: number, g: number, b: number): number {
   return (0xff000000 | (bi << 16) | (gi << 8) | ri) >>> 0;
 }
 
-export function packRGB(c: RGB): number {
-  return pack(c[0], c[1], c[2]);
-}
-
 export function mix(a: RGB, b: RGB, t: number): RGB {
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-}
-
-export function mul(a: RGB, b: RGB): RGB {
-  return [(a[0] * b[0]) / 255, (a[1] * b[1]) / 255, (a[2] * b[2]) / 255];
 }
 
 export function scale(a: RGB, k: number): RGB {
@@ -73,16 +65,4 @@ export function rampScalar(keys: readonly (readonly [number, number])[], v: numb
     }
   }
   return keys[keys.length - 1][1];
-}
-
-export function unpackR(c: number): number {
-  return c & 255;
-}
-
-export function unpackG(c: number): number {
-  return (c >>> 8) & 255;
-}
-
-export function unpackB(c: number): number {
-  return (c >>> 16) & 255;
 }

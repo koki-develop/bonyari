@@ -20,7 +20,13 @@
 
 - `index.html` + `src/top/`: 作品一覧のトップページ
 - 各作品は `<作品名>/index.html` + `src/<作品名>/` の組。作品固有のことはその `src/<作品名>/AGENTS.md` にある
-- `src/shared/base.css`: 全ページ共通の色トークンとリセット
+- `src/shared/`: 作品どうしで共有するもの
+  - `base.css`: 全ページ共通の色トークンとリセット。`ui/`: 作品ページの開始画面と右上の操作ボタン（`work.css` / `overlay.ts`）
+  - `core/`: 色・数学・乱数・ソフトウェアフレームバッファ
+  - `env/`: 時計・天体・星・季節・天気・空の出来事をまとめた `Environment`。季節は作品ごとに `computeSeason` の結果を広げて使う
+  - `render/`: 空・光・空気遠近・木、`Pinhole` カメラ、整数倍拡大の表示（`PixelDisplay`）
+  - `audio/`: 合成の部品、天気と生き物の声、音のエンジンの土台（`AudioEngineBase`）
+  - `platform/`: 表示中と非表示中の両方で世界を進めるループ、画面スリープの抑止
 - `public/thumbs/<作品名>.png`: トップページのサムネイル（320×180）
 
 作品を追加するときは、`vite.config.ts` の `input`、トップページの一覧、サムネイルの3か所をそろえる。
@@ -30,6 +36,7 @@
 - `vite.config.ts` の `base` は `"./"`。どのサブパスに置いても動くように、HTML から参照するパスは相対にする。
 - TypeScript は `erasableSyntaxOnly` と `allowImportingTsExtensions` が有効。enum・namespace・引数プロパティは使わず、import には `.ts` 拡張子を付ける。
 - 開発専用の機能は `import.meta.env.DEV` の分岐に閉じ込め、本番バンドルに残さない。
+- `src/shared/` を変えたら、それを使うすべての作品で見た目と挙動を確かめる。
 
 ## 検証
 

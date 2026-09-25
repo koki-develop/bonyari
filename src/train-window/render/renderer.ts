@@ -1,20 +1,21 @@
-import { mix, type RGB } from "../core/color.ts";
-import { bump, clamp01, smoothstep } from "../core/math.ts";
-import { Surface } from "../core/surface.ts";
-import { formatClock } from "../sim/clock.ts";
+import { mix, type RGB } from "../../shared/core/color.ts";
+import { bump, clamp01, smoothstep } from "../../shared/core/math.ts";
+import { Surface } from "../../shared/core/surface.ts";
+import { formatClock } from "../../shared/env/clock.ts";
 import { crossingActive } from "../sim/crossing.ts";
 import { type Crossing, makeTerrainScratch, type Span, type Station } from "../sim/route.ts";
-import type { Shell } from "../sim/spectacle.ts";
+import type { Shell } from "../sim/fireworks.ts";
 import { type Car, LANE_OFFSET, ONCOMING_CAR_LENGTH, type OncomingTrain } from "../sim/traffic.ts";
 import type { World } from "../sim/world.ts";
 import { Camera, EYE_ABOVE_RAIL } from "./camera.ts";
-import { Cover } from "./cover.ts";
+import { Cover } from "../../shared/render/cover.ts";
+import { PixelDisplay } from "../../shared/render/display.ts";
 import { drawShell } from "./fireworks.ts";
 import { Glass } from "./glass.ts";
 import { GroundRenderer } from "./ground.ts";
 import { Interior, type NearLight, type SunPatch } from "./interior.ts";
 import { computeLayout, type Layout } from "./layout.ts";
-import { computeLighting, type Lighting } from "./lighting.ts";
+import { computeLighting, type Lighting } from "../../shared/render/lighting.ts";
 import { crossingLampPhase, drawCrossing, drawWaitingCar } from "./near/crossing.ts";
 import {
   CANOPY_HEIGHT,
@@ -48,7 +49,7 @@ import {
 } from "./near/trackside.ts";
 import { drawTunnelHills } from "./near/tunnel-hill.ts";
 import { coverOncoming, drawCar, drawOncoming, ONCOMING_LATERAL } from "./near/vehicles.ts";
-import { Painter } from "./painter.ts";
+import { Painter } from "../../shared/render/painter.ts";
 import { Precipitation } from "./precipitation.ts";
 import { RIDGE_LATERALS, RidgeRenderer } from "./ridges.ts";
 import {
@@ -67,9 +68,15 @@ import {
 import { drawBoat, drawIsland, drawLighthouse } from "./scenery/coast.ts";
 import { drawPylon, drawRoadPole, drawStreetLamp } from "./scenery/infra.ts";
 import { placeScenery, type Scenery } from "./scenery/placement.ts";
-import { drawBamboo, drawBroadleaf, drawCedar, drawPine, drawSakura } from "./scenery/trees.ts";
-import { Shade } from "./shade.ts";
-import { SkyRenderer } from "./sky.ts";
+import {
+  drawBamboo,
+  drawBroadleaf,
+  drawCedar,
+  drawPine,
+  drawSakura,
+} from "../../shared/render/trees.ts";
+import { Shade } from "../../shared/render/shade.ts";
+import { SkyRenderer } from "../../shared/render/sky.ts";
 import { TerrainTable } from "./terrain-table.ts";
 
 const TERRAIN = makeTerrainScratch();
@@ -107,20 +114,15 @@ export interface RenderOptions {
  * scales the art pixels up to the display.
  */
 export class Renderer {
-  private readonly display: HTMLCanvasElement;
-  private readonly displayCtx: CanvasRenderingContext2D;
-  private readonly art: HTMLCanvasElement;
-  private readonly artCtx: CanvasRenderingContext2D;
+  private readonly display: PixelDisplay;
   layout!: Layout;
-  private screen!: Surface;
   private view!: Surface;
-  private image!: ImageData;
   interior!: Interior;
   readonly glass: Glass;
   private readonly cam = new Camera();
   private readonly shade = new Shade();
   private readonly stationShade = new Shade();
-  private readonly painter = new Painter();
+  private readonly painter = new Painter<Camera>();
   private readonly cover = new Cover();
   private readonly sky: SkyRenderer;
   private readonly ridges = new RidgeRenderer();
@@ -130,10 +132,6 @@ export class Renderer {
   private readonly scenery: Scenery[] = [];
   private readonly drawables: Drawable[] = [];
   private readonly stationItems = new Map<Station, PlatformItem[]>();
-  private offsetX = 0;
-  private offsetY = 0;
-  private deviceWidth = 0;
-  private deviceHeight = 0;
   /** Duration (s) of the displayed frame, capped; sets the motion blur. */
   private frameDt = 1 / 60;
   /** Average color of the view in the last frame. */
@@ -144,57 +142,30 @@ export class Renderer {
   private sway = 0;
   private lastHeading = Number.NaN;
 
-  constructor(display: HTMLCanvasElement, world: World) {
-    this.display = display;
-    const ctx = display.getContext("2d");
-    this.art = document.createElement("canvas");
-    const artCtx = this.art.getContext("2d");
-    if (!ctx || !artCtx) {
-      throw new Error("Canvas 2D is not available");
-    }
-    this.displayCtx = ctx;
-    this.artCtx = artCtx;
-    this.sky = new SkyRenderer(world);
+  constructor(canvas: HTMLCanvasElement, world: World) {
+    this.display = new PixelDisplay(canvas);
+    this.sky = new SkyRenderer(world.env);
     this.precipitation = new Precipitation(world.seed);
     this.glass = new Glass(world.seed);
   }
 
   resize(deviceWidth: number, deviceHeight: number): void {
-    if (deviceWidth === this.deviceWidth && deviceHeight === this.deviceHeight) {
+    if (this.display.matches(deviceWidth, deviceHeight)) {
       return;
     }
-    this.deviceWidth = deviceWidth;
-    this.deviceHeight = deviceHeight;
-    this.display.width = deviceWidth;
-    this.display.height = deviceHeight;
     const layout = computeLayout(deviceWidth, deviceHeight);
     this.layout = layout;
-    this.screen = new Surface(layout.width, layout.height);
+    this.display.resize(deviceWidth, deviceHeight, layout.width, layout.height, layout.scale);
     this.view = new Surface(layout.window.w, layout.window.h);
-    this.art.width = layout.width;
-    this.art.height = layout.height;
-    this.image = new ImageData(
-      new Uint8ClampedArray(this.screen.data.buffer),
-      layout.width,
-      layout.height,
-    );
     this.interior = new Interior(layout);
     this.glass.resize(layout.window.w, layout.window.h);
     this.precipitation.resize(layout.window.w, layout.window.h);
     this.cam.configure(layout.window.w, layout.window.h, layout.horizon, layout.focal);
-    this.offsetX = Math.floor((layout.width * layout.scale - deviceWidth) / 2);
-    this.offsetY = Math.floor((layout.height * layout.scale - deviceHeight) / 2);
   }
 
   /** Converts a position in CSS pixels on the canvas to art pixels. */
   toArt(cssX: number, cssY: number): { x: number; y: number } {
-    const rect = this.display.getBoundingClientRect();
-    const dx = (cssX / rect.width) * this.deviceWidth;
-    const dy = (cssY / rect.height) * this.deviceHeight;
-    return {
-      x: (dx + this.offsetX) / this.layout.scale,
-      y: (dy + this.offsetY) / this.layout.scale,
-    };
+    return this.display.toArt(cssX, cssY);
   }
 
   render(world: World, dt: number, time: number, options: RenderOptions): void {
@@ -209,17 +180,20 @@ export class Renderer {
     this.frameDt = Math.min(dt, 1 / 30);
     cam.travel = train.speed * this.frameDt;
 
-    const light = computeLighting(world);
-    const visibility = world.weather.state.visibility;
+    const light = computeLighting(
+      world.env,
+      world.route.terrain(train.pos, TERRAIN).lightPollution,
+    );
+    const visibility = world.env.weather.state.visibility;
     this.shade.update(light, visibility);
     this.stationShade.update(this.platformLighting(light), visibility);
-    this.sky.update(dt, world);
+    this.sky.update(dt, world.env);
 
     const view = this.view;
     // Deep in a tunnel the lining covers the whole view: skip all that lies beyond it.
     const [t0, t1] = cam.alongRange(TUNNEL_LATERAL, 2);
     const enclosed = tunnelEncloses(cam, world.route.tunnelsIn(t0, t1));
-    this.painter.begin(view, cam, this.shade, light, world, time, this.cover);
+    this.painter.begin(view, cam, this.shade, light, world.env, time, this.cover);
     this.collectDrawables(world, enclosed ? TUNNEL_LATERAL : Infinity);
     if (enclosed) {
       this.cover.reset(view.width, view.height);
@@ -229,7 +203,7 @@ export class Renderer {
       this.markCover(world);
       this.ridges.prepare(view, cam, world, this.cover);
       this.ground.plan(view, cam, this.ridges.groundLimit, this.cover);
-      this.sky.render(view, cam, world, light, time, this.cover, this.ground.hiddenColumns);
+      this.sky.render(view, cam, world.env, light, time, this.cover, this.ground.hiddenColumns);
       this.ground.render(
         view,
         cam,
@@ -248,9 +222,9 @@ export class Renderer {
     this.precipitation.render(view, cam, world, light, dt, time, shelter);
 
     this.outside = averageColor(view);
-    const w = world.weather.state;
-    const season = world.season;
-    const hour = world.clock.hour;
+    const w = world.env.weather.state;
+    const season = world.env.season;
+    const hour = world.env.clock.hour;
     const condensation = clamp01(
       (0.5 - season.warmth) * 0.9 +
         w.rain * 0.35 +
@@ -275,9 +249,9 @@ export class Renderer {
     ];
     this.updateSway(world, dt);
     const swayPx = Math.abs(this.sway) > 0.6 ? Math.sign(this.sway) : 0;
-    this.glass.composite(this.screen, view, this.layout.window, joltPx, swayPx, fogTint);
+    this.glass.composite(this.display.screen, view, this.layout.window, joltPx, swayPx, fogTint);
 
-    this.interior.render(this.screen, {
+    this.interior.render(this.display.screen, {
       dt,
       seconds: time,
       lampOn: options.lampOn,
@@ -287,7 +261,7 @@ export class Renderer {
       jolt: joltPx,
       sway: this.sway,
       traction: train.traction,
-      time: formatClock(world.clock.minuteOfDay),
+      time: formatClock(world.env.clock.minuteOfDay),
       sillSnow: this.glass.sillSnow,
       condensation,
       stationsVisited: train.stationsVisited,
@@ -295,16 +269,7 @@ export class Renderer {
       hour,
     });
 
-    this.artCtx.putImageData(this.image, 0, 0);
-    const ctx = this.displayCtx;
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(
-      this.art,
-      -this.offsetX,
-      -this.offsetY,
-      this.layout.width * this.layout.scale,
-      this.layout.height * this.layout.scale,
-    );
+    this.display.present();
   }
 
   /**
@@ -409,13 +374,13 @@ export class Renderer {
    * us and nothing outside is in its way.
    */
   private sunPatch(world: World, light: Lighting, shelter: number): SunPatch | null {
-    const alt = world.sky.sunAltitude;
-    const sun = this.cam.toCamera(world.sky.sun);
+    const alt = world.env.sky.sunAltitude;
+    const sun = this.cam.toCamera(world.env.sky.sun);
     if (alt <= 0 || alt > 34 || sun.forward < 0.1 || shelter > 0.5) {
       return null;
     }
     let clear = 1;
-    const p = this.cam.projectDirection(world.sky.sun);
+    const p = this.cam.projectDirection(world.env.sky.sun);
     const view = this.view;
     if (p && p.y >= 0 && p.x >= 0 && p.x < view.width && p.y < view.height) {
       // Is the sun itself visible, or behind trees and buildings?
@@ -428,7 +393,7 @@ export class Renderer {
       }
       clear = clamp01((lum / 9 - 0.55) / 0.3);
     }
-    const w = world.weather.state;
+    const w = world.env.weather.state;
     const intensity =
       smoothstep(0, 3, alt) *
       (1 - smoothstep(20, 34, alt)) *
@@ -534,7 +499,7 @@ export class Renderer {
         out.push({ lateral: road + (car.dir > 0 ? LANE_OFFSET : -LANE_OFFSET), kind: "car", car });
       }
     }
-    for (const shell of world.spectacle.shells) {
+    for (const shell of world.fireworks.shells) {
       out.push({ lateral: shell.lateral, kind: "shell", shell });
     }
 
@@ -572,7 +537,7 @@ export class Renderer {
       out.push({ lateral: 5.2, kind: "pillars", station: st });
       let items = this.stationItems.get(st);
       if (!items) {
-        items = platformItems(st, world.clock.hour);
+        items = platformItems(st, world.env.clock.hour);
         this.stationItems.set(st, items);
       }
       for (const item of items) {
@@ -695,7 +660,7 @@ export class Renderer {
   }
 }
 
-function drawScenery(p: Painter, o: Scenery): void {
+function drawScenery(p: Painter<Camera>, o: Scenery): void {
   switch (o.kind) {
     case "house":
       return drawHouse(p, o);

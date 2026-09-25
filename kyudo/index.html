@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05070d" />
+    <meta name="description" content="弓道場の射位に立って、ただ矢を射るドット絵の小品。" />
+    <title>弓道場 — bonyari</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <canvas id="view" aria-label="射位から見た弓道場"></canvas>
+
+    <button id="start" class="start" type="button">
+      <span class="start-title">弓道場</span>
+      <span class="start-board">タップして射位へ</span>
+      <span class="start-hint">下へ引いて、会で狙い、離す</span>
+      <span class="start-note">音が出ます</span>
+    </button>
+
+    <nav id="hud" class="hud" hidden>
+      <a class="hud-button" href="../" aria-label="作品一覧へ戻る">
+        <svg viewBox="0 0 10 10" aria-hidden="true" shape-rendering="crispEdges">
+          <path d="M5 2h1v1H5zM4 3h1v1H4zM3 4h5v2H3zM4 6h1v1H4zM5 7h1v1H5z" />
+        </svg>
+      </a>
+      <button id="clear" class="hud-button" type="button" aria-label="矢を片付ける">
+        <svg viewBox="0 0 10 10" aria-hidden="true" shape-rendering="crispEdges">
+          <path
+            d="M8 1h1v1H8zM7 2h1v1H7zM6 3h1v1H6zM5 4h1v1H5zM3 5h3v1H3zM2 6h4v1H2zM1 7h5v1H1zM1 8h1v1H1zM3 8h1v1H3zM5 8h1v1H5z"
+          />
+        </svg>
+      </button>
+      <button id="sound" class="hud-button" type="button" aria-pressed="true" aria-label="音を消す">
+        <svg viewBox="0 0 10 10" aria-hidden="true" shape-rendering="crispEdges">
+          <path d="M1 4h2v2H1zM3 3h1v4H3zM4 2h1v6H4z" />
+          <path class="waves" d="M6 4h1v2H6zM8 3h1v4H8zM7 2h1v1H7zM7 7h1v1H7z" />
+          <path class="muted" d="M6 3h1v1H6zM8 3h1v1H8zM7 4h1v2H7zM6 6h1v1H6zM8 6h1v1H8z" />
+        </svg>
+      </button>
+    </nav>
+
+    <script type="module" src="/src/kyudo/main.ts"></script>
+  </body>
+</html>

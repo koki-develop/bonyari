@@ -1,8 +1,14 @@
-import { mix, type RGB } from "../../core/color.ts";
-import { clamp01, smoothstep } from "../../core/math.ts";
-import { hash3, Rng } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
-import type { Scenery } from "./placement.ts";
+import { mix, type RGB } from "../core/color.ts";
+import { clamp01, smoothstep } from "../core/math.ts";
+import { hash3, Rng } from "../core/random.ts";
+import type { Painter } from "./painter.ts";
+
+/** Where a tree stands: along (m), lateral distance (m), and the seed of its shape. */
+export interface Planting {
+  along: number;
+  lateral: number;
+  seed: number;
+}
 
 const SNOW: RGB = [236, 240, 248];
 const BLOSSOM: RGB = [250, 206, 220];
@@ -100,11 +106,11 @@ function foliage(
   }
   const covered = p.cover.order;
   const lateral = p.lateral;
-  // Only pixels inside the clip can be written.
-  const yFrom = Math.max(iy0, view.clipY0);
-  const yTo = Math.min(Math.ceil(y1), view.clipY1 - 1);
-  const xFrom = Math.max(ix0, view.clipX0);
-  const xTo = Math.min(Math.ceil(x1), view.clipX1 - 1);
+  // Only pixels inside the view can be written.
+  const yFrom = Math.max(iy0, 0);
+  const yTo = Math.min(Math.ceil(y1), view.height - 1);
+  const xFrom = Math.max(ix0, 0);
+  const xTo = Math.min(Math.ceil(x1), view.width - 1);
   for (let y = yFrom; y <= yTo; y++) {
     // A clump can only cover pixels of this row if the row crosses it.
     let n0 = 0;
@@ -462,11 +468,8 @@ const BROADLEAF_FORMS: readonly (readonly [CrownForm, number, RGB])[] = [
   [OVAL, 0.2, [92, 82, 70]],
 ];
 
-export function drawBroadleaf(p: Painter, o: Scenery): void {
-  const r = new Rng(o.seed);
-  p.at(o.lateral);
-  const s = p.s;
-  const season = p.world.season;
+/** The form and size of a broadleaf tree: the first draws from its random source. */
+function broadleafShape(r: Rng): { form: CrownForm; bark: RGB; height: number } {
   let pick = r.next();
   let [form, , bark] = BROADLEAF_FORMS[0];
   for (const [f, weight, b] of BROADLEAF_FORMS) {
@@ -477,7 +480,15 @@ export function drawBroadleaf(p: Painter, o: Scenery): void {
       break;
     }
   }
-  const height = r.range(6, 11) * (form === OVAL ? 1.15 : 1);
+  return { form, bark, height: r.range(6, 11) * (form === OVAL ? 1.15 : 1) };
+}
+
+export function drawBroadleaf(p: Painter, o: Planting): void {
+  const r = new Rng(o.seed);
+  p.at(o.lateral);
+  const s = p.s;
+  const season = p.env.season;
+  const { form, bark, height } = broadleafShape(r);
   const cx = p.x(o.along);
   const base = p.y(0);
   const density = season.leafDensity;
@@ -500,17 +511,64 @@ export function drawBroadleaf(p: Painter, o: Scenery): void {
     color,
     0.12 + density * 0.86,
     o.seed,
-    p.world.weather.state.snowCover * density,
+    p.env.weather.state.snowCover * density,
     tree.volume,
   );
 }
 
-export function drawSakura(p: Painter, o: Scenery): void {
+function mapleHeight(r: Rng): number {
+  return r.range(4.5, 7);
+}
+
+/** A Japanese maple: a low, spreading crown, bright green in spring and red late in autumn. */
+export function drawMaple(p: Painter, o: Planting): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
-  const season = p.world.season;
-  const height = r.range(5, 8);
+  const season = p.env.season;
+  const height = mapleHeight(r);
+  const cx = p.x(o.along);
+  const base = p.y(0);
+  // Maples hold their leaves a little longer than the rest.
+  const density = Math.max(
+    season.leafDensity,
+    smoothstep(0.8, 0.72, season.yearFraction) * smoothstep(0.1, 0.16, season.yearFraction),
+  );
+  const color = mix(
+    season.maple,
+    [season.maple[0] * 0.85, season.maple[1] * 0.8, season.maple[2] * 0.8],
+    r.next() * 0.6,
+  );
+  const bark: RGB = [84, 66, 58];
+  const crownPx = SPREAD.rx * height * s;
+  if (crownPx < 1.2) {
+    const top = p.y(height * (SPREAD.center + SPREAD.ry * 0.6));
+    p.rect(cx - 1, top, cx + 1, base, density > 0.4 ? color : bark);
+    return;
+  }
+  const tree = layoutCrown(r, SPREAD, cx, base, height, s);
+  drawStructure(p, r, tree, SPREAD, cx, base, bark, density < 0.95 && crownPx > 4);
+  foliage(
+    p,
+    tree.clumps,
+    color,
+    0.1 + density * 0.88,
+    o.seed,
+    p.env.weather.state.snowCover * density,
+    tree.volume,
+  );
+}
+
+function sakuraHeight(r: Rng): number {
+  return r.range(5, 8);
+}
+
+export function drawSakura(p: Painter, o: Planting): void {
+  const r = new Rng(o.seed);
+  p.at(o.lateral);
+  const s = p.s;
+  const season = p.env.season;
+  const height = sakuraHeight(r);
   const cx = p.x(o.along);
   const base = p.y(0);
   const bloom = season.blossom;
@@ -537,7 +595,7 @@ export function drawSakura(p: Painter, o: Scenery): void {
     color,
     0.1 + density * 0.88,
     o.seed,
-    p.world.weather.state.snowCover * density,
+    p.env.weather.state.snowCover * density,
     tree.volume,
   );
   if (bloom > 0.5 && s > 2) {
@@ -555,18 +613,22 @@ export function drawSakura(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawCedar(p: Painter, o: Scenery): void {
+function cedarShape(r: Rng): { height: number; width: number } {
+  const height = r.range(12, 22);
+  return { height, width: height * r.range(0.2, 0.26) };
+}
+
+export function drawCedar(p: Painter, o: Planting): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
-  const season = p.world.season;
-  const height = r.range(12, 22);
-  const width = height * r.range(0.2, 0.26);
+  const season = p.env.season;
+  const { height, width } = cedarShape(r);
   const cx = p.x(o.along);
   const base = Math.round(p.y(0));
   const top = Math.round(p.y(height));
   const color = mix(season.evergreen, [42, 58, 44], r.next() * 0.4);
-  const snow = p.world.weather.state.snowCover;
+  const snow = p.env.weather.state.snowCover;
   if (width * s < 1.5) {
     p.rect(cx, top, cx + 1, base, color);
     return;
@@ -618,7 +680,7 @@ export function drawCedar(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawBamboo(p: Painter, o: Scenery): void {
+export function drawBamboo(p: Painter, o: Planting): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -626,7 +688,7 @@ export function drawBamboo(p: Painter, o: Scenery): void {
   const cx = p.x(o.along);
   const base = Math.round(p.y(0));
   const width = r.range(8, 14) * s;
-  const color = mix(BAMBOO, p.world.season.grass, 0.25);
+  const color = mix(BAMBOO, p.env.season.grass, 0.25);
   // A grove: slender culms clothed in feathery leaves most of the way up,
   // the tips bowing over.
   const clumps: Clump[] = [];
@@ -647,14 +709,18 @@ export function drawBamboo(p: Painter, o: Scenery): void {
       });
     }
   }
-  foliage(p, clumps, color, 1, o.seed, p.world.weather.state.snowCover * 0.6);
+  foliage(p, clumps, color, 1, o.seed, p.env.weather.state.snowCover * 0.6);
 }
 
-export function drawPine(p: Painter, o: Scenery): void {
+function pineHeight(r: Rng): number {
+  return r.range(7, 12);
+}
+
+export function drawPine(p: Painter, o: Planting): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
-  const height = r.range(7, 12);
+  const height = pineHeight(r);
   const cx = p.x(o.along);
   const base = p.y(0);
   const topY = p.y(height);
@@ -714,6 +780,46 @@ export function drawPine(p: Painter, o: Scenery): void {
     r: Math.max(1, height * 0.13 * s),
     squash: 0.5,
   });
-  const color = mix(p.world.season.evergreen, [48, 70, 52], 0.3);
-  foliage(p, clumps, color, 1, o.seed, p.world.weather.state.snowCover);
+  const color = mix(p.env.season.evergreen, [48, 70, 52], 0.3);
+  foliage(p, clumps, color, 1, o.seed, p.env.weather.state.snowCover);
+}
+
+export type TreeKind = "broadleaf" | "sakura" | "maple" | "cedar" | "pine";
+
+/** The foliage of a tree as an upright ellipsoid (m): its center height and half extents. */
+export interface Crown {
+  height: number;
+  center: number;
+  rx: number;
+  ry: number;
+}
+
+/** The crown the drawing of a tree of `kind` and `seed` has, for casting its shade. */
+export function crownOf(kind: TreeKind, seed: number): Crown {
+  const r = new Rng(seed);
+  const ellipsoid = (form: CrownForm, height: number): Crown => ({
+    height,
+    center: form.center * height,
+    rx: form.rx * height,
+    ry: form.ry * height,
+  });
+  switch (kind) {
+    case "broadleaf": {
+      const { form, height } = broadleafShape(r);
+      return ellipsoid(form, height);
+    }
+    case "sakura":
+      return ellipsoid(SPREAD, sakuraHeight(r));
+    case "maple":
+      return ellipsoid(SPREAD, mapleHeight(r));
+    case "cedar": {
+      // A tiered cone from low on the trunk to the top.
+      const { height, width } = cedarShape(r);
+      return { height, center: height * 0.55, rx: width * 0.36, ry: height * 0.43 };
+    }
+    case "pine": {
+      const height = pineHeight(r);
+      return { height, center: height * 0.78, rx: height * 0.32, ry: height * 0.2 };
+    }
+  }
 }

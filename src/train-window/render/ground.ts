@@ -1,12 +1,19 @@
-import { pack } from "../core/color.ts";
-import { clamp01, DEG, intervalCoverage, lerp, pulseCoverage, smoothstep } from "../core/math.ts";
-import { hash2, hash3, tileNoise } from "../core/random.ts";
-import { bayer, type Surface } from "../core/surface.ts";
+import { pack } from "../../shared/core/color.ts";
+import {
+  clamp01,
+  DEG,
+  intervalCoverage,
+  lerp,
+  pulseCoverage,
+  smoothstep,
+} from "../../shared/core/math.ts";
+import { hash2, hash3, tileNoise } from "../../shared/core/random.ts";
+import { bayer, type Surface } from "../../shared/core/surface.ts";
 import type { Bridge, Crossing } from "../sim/route.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
-import type { Cover } from "./cover.ts";
-import type { Lighting } from "./lighting.ts";
+import type { Cover } from "../../shared/render/cover.ts";
+import type { Lighting } from "../../shared/render/lighting.ts";
 import type { TerrainTable } from "./terrain-table.ts";
 
 const PLOT_ALONG = 34;
@@ -262,21 +269,21 @@ export class GroundRenderer {
     const bandColumns = this.bandColumns;
     // Rows below the horizon that a reflection can read back.
     const bandEnd = Math.ceil(cam.horizon) + 2;
-    const season = world.season;
-    const weather = world.weather.state;
+    const season = world.env.season;
+    const weather = world.env.weather.state;
     const seed = world.seed;
     const [a0, a1] = cam.alongRange(MAX_GROUND, 2);
     const waters: Bridge[] = route.bridgesIn(a0, a1);
     const [n0, n1] = cam.alongRange(400, 4);
     const crossings: Crossing[] = route.crossingsIn(n0 - 10, n1 + 10);
-    const sunX = cam.projectDirection(world.sky.sun)?.x ?? -1e9;
-    const moonX = cam.projectDirection(world.sky.moon)?.x ?? -1e9;
-    const sunAlt = Math.max(0.5, world.sky.sunAltitude);
-    const moonAlt = Math.max(0.5, world.sky.moonAltitude);
-    const sunGlint = smoothstep(-2, 6, world.sky.sunAltitude) * (1 - weather.cloudCover * 0.85);
+    const sunX = cam.projectDirection(world.env.sky.sun)?.x ?? -1e9;
+    const moonX = cam.projectDirection(world.env.sky.moon)?.x ?? -1e9;
+    const sunAlt = Math.max(0.5, world.env.sky.sunAltitude);
+    const moonAlt = Math.max(0.5, world.env.sky.moonAltitude);
+    const sunGlint = smoothstep(-2, 6, world.env.sky.sunAltitude) * (1 - weather.cloudCover * 0.85);
     const moonGlint =
-      smoothstep(0, 10, world.sky.moonAltitude) *
-      world.sky.moonIllumination *
+      smoothstep(0, 10, world.env.sky.moonAltitude) *
+      world.env.sky.moonIllumination *
       (1 - light.daylight) *
       (1 - weather.cloudCover * 0.9);
     const [ar, ag, ab] = light.ambient;
@@ -290,7 +297,7 @@ export class GroundRenderer {
     this.wildflowers = season.wildflowers;
     this.higanbana = season.higanbana;
     // Sunlight on the snow: drifts are lit on the sun's side, blue in their shade.
-    const sun = cam.toCamera(world.sky.sun);
+    const sun = cam.toCamera(world.env.sky.sun);
     const direct = light.direct;
     this.sunRight = sun.right;
     this.sunUp = sun.up;

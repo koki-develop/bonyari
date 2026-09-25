@@ -1,5 +1,5 @@
-import { pack } from "../core/color.ts";
-import type { Surface } from "../core/surface.ts";
+import { pack } from "../../shared/core/color.ts";
+import type { Surface } from "../../shared/core/surface.ts";
 
 type Glyph = readonly string[];
 

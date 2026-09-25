@@ -1,6 +1,7 @@
-import type { RGB } from "../../core/color.ts";
-import { Rng } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
+import type { RGB } from "../../../shared/core/color.ts";
+import { Rng } from "../../../shared/core/random.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 import type { Scenery } from "./placement.ts";
 
 const CONCRETE_POLE: RGB = [150, 148, 142];
@@ -10,7 +11,7 @@ const LAMP_LIGHT: RGB = [255, 226, 176];
 
 /** A sagging wire between two screen points; `sag` in pixels at the middle. */
 function wire(
-  p: Painter,
+  p: Painter<Camera>,
   x0: number,
   y0: number,
   x1: number,
@@ -36,7 +37,7 @@ function wire(
   }
 }
 
-export function drawRoadPole(p: Painter, o: Scenery): void {
+export function drawRoadPole(p: Painter<Camera>, o: Scenery): void {
   p.at(o.lateral);
   const s = p.s;
   const cx = p.x(o.along);
@@ -61,7 +62,7 @@ export function drawRoadPole(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawStreetLamp(p: Painter, o: Scenery): void {
+export function drawStreetLamp(p: Painter<Camera>, o: Scenery): void {
   p.at(o.lateral);
   const s = p.s;
   const cx = p.x(o.along);
@@ -82,7 +83,7 @@ export function drawStreetLamp(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawPylon(p: Painter, o: Scenery): void {
+export function drawPylon(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;

@@ -1,7 +1,8 @@
-import type { RGB } from "../core/color.ts";
-import { hash3 } from "../core/random.ts";
-import type { Shell } from "../sim/spectacle.ts";
-import type { Painter } from "./painter.ts";
+import type { RGB } from "../../shared/core/color.ts";
+import { hash3 } from "../../shared/core/random.ts";
+import type { Shell } from "../sim/fireworks.ts";
+import type { Painter } from "../../shared/render/painter.ts";
+import type { Camera } from "./camera.ts";
 
 function hueToRgb(h: number, saturation: number): RGB {
   const k = (n: number) => (n + h * 6) % 6;
@@ -12,7 +13,7 @@ function hueToRgb(h: number, saturation: number): RGB {
 const GOLD: RGB = [255, 198, 110];
 
 /** A firework shell: the rising spark, then the burst of stars falling away. */
-export function drawShell(p: Painter, shell: Shell): void {
+export function drawShell(p: Painter<Camera>, shell: Shell): void {
   p.at(shell.lateral);
   const s = p.s;
   const view = p.view;

@@ -1,9 +1,6 @@
 import { add, desaturate, hex, luminance, mix, ramp, type RGB, scale } from "../core/color.ts";
 import { clamp01, smoothstep } from "../core/math.ts";
-import { makeTerrainScratch } from "../sim/route.ts";
-import type { World } from "../sim/world.ts";
-
-const TERRAIN_SCRATCH = makeTerrainScratch();
+import type { Environment } from "../env/environment.ts";
 
 /** Per-frame light and color state shared by every layer. */
 export interface Lighting {
@@ -26,8 +23,8 @@ export interface Lighting {
   /** Street lamps and lit windows. */
   lamps: number;
   starVisibility: number;
-  /** Sky brightness 0..1, used to fade stars and reflections. */
-  skyLuminance: number;
+  /** Glow of nearby towns (0..1) that lights the underside of clouds at night. */
+  lightPollution: number;
 }
 
 const ZENITH: readonly (readonly [number, RGB])[] = [
@@ -77,9 +74,10 @@ const SUN_GLOW: readonly (readonly [number, RGB])[] = [
   [40, hex("#fffaf0")],
 ];
 
-export function computeLighting(world: World): Lighting {
-  const alt = world.sky.sunAltitude;
-  const w = world.weather.state;
+/** @param lightPollution glow of nearby towns, 0 (none) to 1 (city) */
+export function computeLighting(env: Environment, lightPollution: number): Lighting {
+  const alt = env.sky.sunAltitude;
+  const w = env.weather.state;
   const cloud = w.cloudCover;
   const overcast = clamp01(cloud * 1.1 - 0.15);
   const gloom = clamp01(overcast * 0.35 + w.rain * 0.25 + w.storm * 0.25 + w.snow * 0.1);
@@ -89,9 +87,8 @@ export function computeLighting(world: World): Lighting {
   let ambient = ramp(AMBIENT, alt);
 
   // Moonlight lifts the night a little.
-  const moonUp = smoothstep(-2, 12, world.sky.moonAltitude);
-  const moon =
-    moonUp * world.sky.moonIllumination * (1 - overcast * 0.8) * smoothstep(-2, -10, alt);
+  const moonUp = smoothstep(-2, 12, env.sky.moonAltitude);
+  const moon = moonUp * env.sky.moonIllumination * (1 - overcast * 0.8) * smoothstep(-2, -10, alt);
   ambient = add(ambient, scale([30, 36, 58], moon));
   zenith = add(zenith, scale([8, 12, 24], moon));
   horizon = add(horizon, scale([10, 14, 26], moon));
@@ -125,7 +122,6 @@ export function computeLighting(world: World): Lighting {
     daylight * 0.8,
   );
   const cloudShade = scale(mix(zenith, [150, 150, 160], 0.45), 0.72);
-  const terrain = world.route.terrain(world.train.pos, TERRAIN_SCRATCH);
 
   return {
     zenith,
@@ -139,8 +135,7 @@ export function computeLighting(world: World): Lighting {
     daylight,
     direct: smoothstep(-1, 10, alt) * (1 - overcast) * (1 - gloom),
     lamps: Math.max(smoothstep(4, -3, alt), clamp01(gloom * 1.4 - 0.4)),
-    starVisibility:
-      smoothstep(-5, -15, alt) * (1 - terrain.lightPollution * 0.55) * (1 - w.mist * 0.6),
-    skyLuminance: luminance(mix(zenith, horizon, 0.5)),
+    starVisibility: smoothstep(-5, -15, alt) * (1 - lightPollution * 0.55) * (1 - w.mist * 0.6),
+    lightPollution,
   };
 }

@@ -1,5 +1,5 @@
-import { smoothstep } from "../core/math.ts";
-import { fbm1, Rng } from "../core/random.ts";
+import { smoothstep } from "../../shared/core/math.ts";
+import { fbm1, Rng } from "../../shared/core/random.ts";
 
 export type SectionKind = "countryside" | "town" | "city" | "mountain" | "coast" | "river";
 

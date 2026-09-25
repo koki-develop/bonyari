@@ -1,4 +1,4 @@
-import { hash3, hashU32, tileNoise } from "../../core/random.ts";
+import { hash3, hashU32, tileNoise } from "../../../shared/core/random.ts";
 import type { Bridge, Crossing, Span, Station } from "../../sim/route.ts";
 import type { World } from "../../sim/world.ts";
 import type { Camera } from "../camera.ts";
@@ -96,7 +96,7 @@ export function placeScenery(out: Scenery[], cam: Camera, world: World, table: T
     crossings: route.crossingsIn(wa, wb),
     tunnels: route.tunnelsIn(wa - 400, wb + 400),
   };
-  const season = world.season;
+  const season = world.env.season;
 
   BANDS.forEach((band, bi) => {
     const mid = (band.min + band.max) / 2;

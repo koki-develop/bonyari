@@ -1,4 +1,4 @@
-import { smoothstep } from "../core/math.ts";
+import { smoothstep } from "../../shared/core/math.ts";
 import type { Crossing } from "./route.ts";
 
 /** Along-track distance before and after a crossing during which it is active. */

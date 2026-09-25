@@ -2,10 +2,10 @@ import type { RGB } from "../core/color.ts";
 import { bump, clamp01 } from "../core/math.ts";
 import { hash3 } from "../core/random.ts";
 import type { Surface } from "../core/surface.ts";
-import type { World } from "../sim/world.ts";
-import type { Camera } from "./camera.ts";
+import type { Environment } from "../env/environment.ts";
 import type { Cover } from "./cover.ts";
 import type { Lighting } from "./lighting.ts";
+import type { Pinhole } from "./pinhole.ts";
 import type { Shade } from "./shade.ts";
 
 const WARM: RGB = [255, 206, 136];
@@ -25,12 +25,12 @@ function occupancy(hour: number): number {
  * Drawing helpers for scenery at a given distance: colors are lit by the scene
  * and faded by aerial perspective; lights are emissive.
  */
-export class Painter {
+export class Painter<C extends Pinhole = Pinhole> {
   view!: Surface;
-  cam!: Camera;
+  cam!: C;
   shade!: Shade;
   light!: Lighting;
-  world!: World;
+  env!: Environment;
   /** Pixels that nearer layers will paint over later this frame. */
   cover!: Cover;
   time = 0;
@@ -51,10 +51,10 @@ export class Painter {
 
   begin(
     view: Surface,
-    cam: Camera,
+    cam: C,
     shade: Shade,
     light: Lighting,
-    world: World,
+    env: Environment,
     time: number,
     cover: Cover,
   ): void {
@@ -63,12 +63,12 @@ export class Painter {
     this.cam = cam;
     this.shade = shade;
     this.light = light;
-    this.world = world;
+    this.env = env;
     this.time = time;
-    const hour = world.clock.hour;
+    const hour = env.clock.hour;
     this.windowProbability = light.lamps * occupancy(hour);
-    this.hourBucket = world.clock.days * 8;
-    const sun = cam.toCamera(world.sky.sun);
+    this.hourBucket = env.clock.days * 8;
+    const sun = cam.toCamera(env.sky.sun);
     this.sun.right = sun.right;
     this.sun.up = sun.up;
     this.sun.back = -sun.forward;

@@ -1,9 +1,10 @@
-import { mix, type RGB } from "../../core/color.ts";
-import { clamp01, smoothstep } from "../../core/math.ts";
-import { hash3, noise1, noise2 } from "../../core/random.ts";
+import { mix, type RGB } from "../../../shared/core/color.ts";
+import { clamp01, smoothstep } from "../../../shared/core/math.ts";
+import { hash3, noise1, noise2 } from "../../../shared/core/random.ts";
 import type { Span } from "../../sim/route.ts";
 import { EYE_ABOVE_RAIL } from "../camera.ts";
-import type { Painter } from "../painter.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 
 /** Height (m above the rails) of a portal's headwall. */
 export const PORTAL_TOP = 8.6;
@@ -92,12 +93,12 @@ function canopy(t: Span, along: number, lateral: number): number {
  * pixel's ray until it meets the ground of the hill. Drawn early, so things
  * standing in front of the hill are painted over it.
  */
-export function drawTunnelHills(p: Painter, tunnels: readonly Span[]): void {
+export function drawTunnelHills(p: Painter<Camera>, tunnels: readonly Span[]): void {
   const { view, cam, shade } = p;
   const F = cam.focal;
   const covered = p.cover.order;
-  const season = p.world.season;
-  const snow = p.world.weather.state.snowCover;
+  const season = p.env.season;
+  const snow = p.env.weather.state.snowCover;
   // A mixed wood: stands of evergreens among deciduous trees that turn and go bare.
   const evergreen = season.evergreen;
   const deciduous = mix(BARE, season.leaf, clamp01(season.leafDensity * 1.2));

@@ -11,41 +11,21 @@ export function bayer(x: number, y: number): number {
 
 /**
  * A software framebuffer. Every pixel is an opaque color packed as in `ImageData`
- * (see `pack`). All drawing is clipped to the clip rectangle.
+ * (see `pack`). All drawing is clipped to its bounds.
  */
 export class Surface {
   readonly width: number;
   readonly height: number;
   readonly data: Uint32Array<ArrayBuffer>;
-  clipX0 = 0;
-  clipY0 = 0;
-  clipX1: number;
-  clipY1: number;
 
   constructor(width: number, height: number) {
     this.width = width;
     this.height = height;
     this.data = new Uint32Array(width * height);
-    this.clipX1 = width;
-    this.clipY1 = height;
   }
 
-  setClip(x0: number, y0: number, x1: number, y1: number): void {
-    this.clipX0 = Math.max(0, Math.floor(x0));
-    this.clipY0 = Math.max(0, Math.floor(y0));
-    this.clipX1 = Math.min(this.width, Math.ceil(x1));
-    this.clipY1 = Math.min(this.height, Math.ceil(y1));
-  }
-
-  resetClip(): void {
-    this.clipX0 = 0;
-    this.clipY0 = 0;
-    this.clipX1 = this.width;
-    this.clipY1 = this.height;
-  }
-
-  inClip(x: number, y: number): boolean {
-    return x >= this.clipX0 && x < this.clipX1 && y >= this.clipY0 && y < this.clipY1;
+  inBounds(x: number, y: number): boolean {
+    return x >= 0 && x < this.width && y >= 0 && y < this.height;
   }
 
   fill(color: number): void {
@@ -55,7 +35,7 @@ export class Surface {
   set(x: number, y: number, color: number): void {
     x |= 0;
     y |= 0;
-    if (this.inClip(x, y)) {
+    if (this.inBounds(x, y)) {
       this.data[y * this.width + x] = color;
     }
   }
@@ -70,7 +50,7 @@ export class Surface {
   blend(x: number, y: number, r: number, g: number, b: number, a: number): void {
     x |= 0;
     y |= 0;
-    if (a <= 0 || !this.inClip(x, y)) {
+    if (a <= 0 || !this.inBounds(x, y)) {
       return;
     }
     const i = y * this.width + x;
@@ -89,7 +69,7 @@ export class Surface {
   add(x: number, y: number, r: number, g: number, b: number): void {
     x |= 0;
     y |= 0;
-    if (!this.inClip(x, y)) {
+    if (!this.inBounds(x, y)) {
       return;
     }
     const i = y * this.width + x;
@@ -98,10 +78,10 @@ export class Surface {
   }
 
   fillRect(x: number, y: number, w: number, h: number, color: number): void {
-    const x0 = Math.max(this.clipX0, Math.round(x));
-    const y0 = Math.max(this.clipY0, Math.round(y));
-    const x1 = Math.min(this.clipX1, Math.round(x + w));
-    const y1 = Math.min(this.clipY1, Math.round(y + h));
+    const x0 = Math.max(0, Math.round(x));
+    const y0 = Math.max(0, Math.round(y));
+    const x1 = Math.min(this.width, Math.round(x + w));
+    const y1 = Math.min(this.height, Math.round(y + h));
     for (let yy = y0; yy < y1; yy++) {
       const row = yy * this.width;
       this.data.fill(color, row + x0, row + Math.max(x0, x1));
@@ -120,24 +100,17 @@ export class Surface {
     }
   }
 
-  hline(x0: number, x1: number, y: number, color: number): void {
-    this.fillRect(Math.min(x0, x1), y, Math.abs(x1 - x0) + 1, 1, color);
-  }
-
-  vline(x: number, y0: number, y1: number, color: number): void {
-    this.fillRect(x, Math.min(y0, y1), 1, Math.abs(y1 - y0) + 1, color);
-  }
-
   /** Additive radial glow with a smooth falloff; `intensity` scales the center color. */
   glow(cx: number, cy: number, radius: number, c: RGB, intensity: number): void {
     if (intensity <= 0.002 || radius <= 0) {
       return;
     }
     const r2 = radius * radius;
-    const x0 = Math.floor(cx - radius);
-    const x1 = Math.ceil(cx + radius);
-    const y0 = Math.floor(cy - radius);
-    const y1 = Math.ceil(cy + radius);
+    // Only the part inside the bounds can change.
+    const x0 = Math.max(0, Math.floor(cx - radius));
+    const x1 = Math.min(this.width - 1, Math.ceil(cx + radius));
+    const y0 = Math.max(0, Math.floor(cy - radius));
+    const y1 = Math.min(this.height - 1, Math.ceil(cy + radius));
     for (let y = y0; y <= y1; y++) {
       const dy = y + 0.5 - cy;
       for (let x = x0; x <= x1; x++) {
@@ -153,12 +126,12 @@ export class Surface {
     }
   }
 
-  /** Copies `src` onto this surface at (dx, dy), clipped. */
+  /** Copies `src` onto this surface at (dx, dy), clipped to the bounds. */
   blit(src: Surface, dx: number, dy: number): void {
-    const x0 = Math.max(this.clipX0, dx);
-    const y0 = Math.max(this.clipY0, dy);
-    const x1 = Math.min(this.clipX1, dx + src.width);
-    const y1 = Math.min(this.clipY1, dy + src.height);
+    const x0 = Math.max(0, dx);
+    const y0 = Math.max(0, dy);
+    const x1 = Math.min(this.width, dx + src.width);
+    const y1 = Math.min(this.height, dy + src.height);
     for (let y = y0; y < y1; y++) {
       const s = (y - dy) * src.width + (x0 - dx);
       this.data.set(src.data.subarray(s, s + (x1 - x0)), y * this.width + x0);

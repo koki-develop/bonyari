@@ -1,10 +1,10 @@
-import { hex, pack, type RGB } from "../../core/color.ts";
-import { intervalCoverage, mod, pulseCoverage, smoothstep } from "../../core/math.ts";
-import { hash2, Rng } from "../../core/random.ts";
+import { hex, pack, type RGB } from "../../../shared/core/color.ts";
+import { intervalCoverage, mod, pulseCoverage, smoothstep } from "../../../shared/core/math.ts";
+import { hash2, Rng } from "../../../shared/core/random.ts";
 import { type Car, ONCOMING_CAR_LENGTH, type OncomingTrain } from "../../sim/traffic.ts";
 import type { Camera } from "../camera.ts";
-import type { Cover } from "../cover.ts";
-import type { Painter } from "../painter.ts";
+import type { Cover } from "../../../shared/render/cover.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
 
 /** Near face of a train on the adjacent track. */
 export const ONCOMING_LATERAL = 2.7;
@@ -153,7 +153,7 @@ export function coverOncoming(
  * @param spill how strongly our lit car shines out onto it (0..1)
  */
 export function drawOncoming(
-  p: Painter,
+  p: Painter<Camera>,
   train: OncomingTrain,
   relativeTravel: number,
   spill: number,
@@ -443,7 +443,7 @@ function profileAt(profile: readonly (readonly [number, number])[], t: number): 
  * a profile, the body catching the sky along its shoulder, windows reflecting
  * the sky over a dark cabin, and wheels in their arches. Lamps at night.
  */
-export function drawCar(p: Painter, car: Car, lateral: number): void {
+export function drawCar(p: Painter<Camera>, car: Car, lateral: number): void {
   p.at(lateral);
   const s = p.s;
   const dims: Record<Car["kind"], number> = { car: 4.4, kei: 3.4, van: 4.7, bus: 11 };

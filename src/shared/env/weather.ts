@@ -1,5 +1,6 @@
 import { approach, bump, clamp01, smoothstep } from "../core/math.ts";
 import { hash, Rng } from "../core/random.ts";
+import { asRecord, isFiniteNumber, isOneOf, isUint32 } from "../core/validate.ts";
 import type { SeasonState } from "./season.ts";
 
 export type WeatherKind = "clear" | "cloudy" | "rain" | "storm" | "snow";
@@ -227,4 +228,56 @@ export class Weather {
       this.strikeCount++;
     }
   }
+}
+
+type Levels = Omit<WeatherSnapshot["state"], "kind">;
+
+const WEATHER_LEVELS = [
+  "cloudCover",
+  "rain",
+  "snow",
+  "storm",
+  "wind",
+  "mist",
+  "visibility",
+  "snowCover",
+  "wetness",
+] as const satisfies readonly (keyof Levels)[];
+
+// Fails to compile when a weather level is missing from WEATHER_LEVELS.
+const LEVELS_COMPLETE: [Exclude<keyof Levels, (typeof WEATHER_LEVELS)[number]>] extends [never]
+  ? true
+  : never = true;
+void LEVELS_COMPLETE;
+
+/** The snapshot in `value`, or null unless it is well formed. */
+export function readWeatherSnapshot(value: unknown): WeatherSnapshot | null {
+  const o = asRecord(value);
+  const s = asRecord(o?.state);
+  if (
+    !o ||
+    !s ||
+    !isUint32(o.rng) ||
+    !isFiniteNumber(o.remainingDays) ||
+    !isFiniteNumber(o.targetCloud) ||
+    !isFiniteNumber(o.targetPrecip) ||
+    !isOneOf(s.kind, WEATHER_KINDS)
+  ) {
+    return null;
+  }
+  const levels = {} as Levels;
+  for (const key of WEATHER_LEVELS) {
+    const level = s[key];
+    if (!isFiniteNumber(level)) {
+      return null;
+    }
+    levels[key] = level;
+  }
+  return {
+    rng: o.rng,
+    remainingDays: o.remainingDays,
+    targetCloud: o.targetCloud,
+    targetPrecip: o.targetPrecip,
+    state: { kind: s.kind, ...levels },
+  };
 }

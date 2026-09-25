@@ -1,5 +1,5 @@
 import { SECTION_KINDS, type SectionKind } from "./sim/route.ts";
-import { WEATHER_KINDS, type WeatherKind } from "./sim/weather.ts";
+import { WEATHER_KINDS, type WeatherKind } from "../shared/env/weather.ts";
 import type { WorldOptions } from "./sim/world.ts";
 
 /**

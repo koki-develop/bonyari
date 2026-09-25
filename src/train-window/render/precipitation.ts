@@ -1,8 +1,8 @@
-import { Rng } from "../core/random.ts";
-import type { Surface } from "../core/surface.ts";
+import { Rng } from "../../shared/core/random.ts";
+import type { Surface } from "../../shared/core/surface.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
-import type { Lighting } from "./lighting.ts";
+import type { Lighting } from "../../shared/render/lighting.ts";
 
 /** Lateral distances (m) of the particle layers, nearest first. */
 const LAYERS = [2.6, 5, 10, 22, 50];
@@ -59,7 +59,7 @@ export class Precipitation {
     time: number,
     shelter: number,
   ): void {
-    const w = world.weather.state;
+    const w = world.env.weather.state;
     const rain = w.rain * (1 - shelter);
     const snow = w.snow * (1 - shelter);
     if (rain < 0.02 && snow < 0.02) {

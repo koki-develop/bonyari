@@ -162,3 +162,82 @@ export function chain(...nodes: [AudioNode, ...AudioNode[], AudioNode | AudioPar
     }
   }
 }
+
+export function tone(
+  ctx: BaseAudioContext,
+  type: OscillatorType,
+  freq: number,
+  start: number,
+  stop: number,
+): OscillatorNode {
+  const o = ctx.createOscillator();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, start);
+  o.start(start);
+  o.stop(stop);
+  return o;
+}
+
+/** A struck note: partials with individual decays, like a bell or a marimba bar. */
+export function struck(
+  ctx: BaseAudioContext,
+  out: AudioNode,
+  freq: number,
+  start: number,
+  partials: readonly (readonly [number, number, number])[],
+): void {
+  for (const [ratio, amp, decay] of partials) {
+    const o = tone(ctx, "sine", freq * ratio, start, start + decay * 5);
+    const g = envelope(ctx, start, 0.002, decay, amp);
+    chain(o, g, out);
+  }
+}
+
+/** A mode of a struck body: frequency (Hz), seconds to fall by about 60 dB, and level. */
+export type Mode = readonly [number, number, number];
+
+/**
+ * A struck body (modal synthesis): a short burst of noise, the blow, rings
+ * through a resonator for each of the body's modes. The ring has the uneven
+ * partials and the rough onset of wood, bamboo or paper rather than the
+ * clean tone of an oscillator.
+ * @param blow seconds the blow lasts; shorter is harder
+ */
+export function resonate(
+  ctx: BaseAudioContext,
+  noise: AudioBuffer,
+  out: AudioNode,
+  start: number,
+  modes: readonly Mode[],
+  blow: number,
+  offset: number,
+): void {
+  const src = noiseBurst(ctx, noise, start, blow + 0.02, offset);
+  const hit = envelope(ctx, start, 0.0003, blow, 1);
+  src.connect(hit);
+  for (const [freq, decay, level] of modes) {
+    // A bandpass rings for about Q / (π f) seconds; its gain at the peak is 1,
+    // so a narrower one passes less of the blow: make up for it.
+    const q = Math.max(1, (Math.PI * freq * decay) / 6.9);
+    const band = filter(ctx, "bandpass", freq, q);
+    chain(hit, band, gainNode(ctx, level * Math.sqrt(q) * 2), out);
+  }
+}
+
+/** Scales a rendered sound so its loudest sample is `peak`. */
+export function normalize(buffer: AudioBuffer, peak = 0.9): AudioBuffer {
+  let max = 0;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    for (const v of buffer.getChannelData(c)) {
+      max = Math.max(max, Math.abs(v));
+    }
+  }
+  const k = max > 0 ? peak / max : 0;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const d = buffer.getChannelData(c);
+    for (let i = 0; i < d.length; i++) {
+      d[i] *= k;
+    }
+  }
+  return buffer;
+}

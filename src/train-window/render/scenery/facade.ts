@@ -1,7 +1,8 @@
-import { hex, mix, type RGB } from "../../core/color.ts";
-import { clamp01, mod } from "../../core/math.ts";
-import { hash3 } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
+import { hex, mix, type RGB } from "../../../shared/core/color.ts";
+import { clamp01, mod } from "../../../shared/core/math.ts";
+import { hash3 } from "../../../shared/core/random.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 
 /**
  * Building parts shared by houses, apartments and shops. Every function works
@@ -29,7 +30,7 @@ const TV: RGB = [150, 180, 255];
 
 /** A building placed on screen: its center, ground line and scale. */
 export interface Frame {
-  p: Painter;
+  p: Painter<Camera>;
   /** Screen x of the building's center. */
   cx: number;
   /** Art pixels per meter. */
@@ -323,7 +324,7 @@ export function windowUnit(
 }
 
 /** Day glass color: sky above, darker room below. */
-function glassColor(p: Painter, t: number): RGB {
+function glassColor(p: Painter<Camera>, t: number): RGB {
   const sky = mix(p.light.zenith, p.light.horizon, 0.5);
   const dark: RGB = [40, 46, 56];
   // Unlit glass shows the sky by day and is near-black at night.
@@ -375,8 +376,8 @@ const LAUNDRY: readonly RGB[] = [
 /** Washing on a pole, and sometimes a futon over the railing, on fine days. */
 export function laundry(f: Frame, x0: number, x1: number, floor: number, index: number): void {
   const { p, s, seed } = f;
-  const hour = p.world.clock.hour;
-  const w = p.world.weather.state;
+  const hour = p.env.clock.hour;
+  const w = p.env.weather.state;
   if (
     hour < 8 ||
     hour > 16.5 ||
@@ -468,7 +469,7 @@ export function frontFence(
     p.rect(a, top - 1, b, top, [196, 192, 184]);
     return;
   }
-  const green = mix(p.world.season.evergreen, [70, 110, 60], 0.3);
+  const green = mix(p.env.season.evergreen, [70, 110, 60], 0.3);
   const top = py(f, 1.1);
   for (let x = a; x < b; x++) {
     const bump = hash3(seed, x - a, 71) * 0.15 * s;
@@ -528,7 +529,7 @@ export const DRINK_COLORS: readonly RGB[] = [
  * `floor` is the height (m above ground, or above rails when `rail`) it stands on.
  */
 export function vendingMachine(
-  p: Painter,
+  p: Painter<Camera>,
   along: number,
   lateral: number,
   floor: number,
@@ -578,7 +579,7 @@ export function vendingMachine(
       p.lightRect(xx, rb - 1 - canH, xx + 1, rb - 1, c, 0.95);
     }
     // Price labels: blue for cold, red for hot (mostly red in winter).
-    const hot = hash3(seed, row, 99) < 0.2 + (1 - p.world.season.warmth) * 0.5;
+    const hot = hash3(seed, row, 99) < 0.2 + (1 - p.env.season.warmth) * 0.5;
     p.lightRect(x0 + 1, rb - 1, x1 - 2, rb, hot ? [230, 70, 60] : [70, 130, 230], 0.9);
   }
   // Coin panel and bill slot on the right, an advert on the left.

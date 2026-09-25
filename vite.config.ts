@@ -7,5 +7,6 @@ export default defineConfig({
   input: {
     main: resolve(import.meta.dirname, "index.html"),
     trainWindow: resolve(import.meta.dirname, "train-window/index.html"),
+    kyudo: resolve(import.meta.dirname, "kyudo/index.html"),
   },
 });

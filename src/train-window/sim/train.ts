@@ -1,4 +1,4 @@
-import { approach, clamp, mod } from "../core/math.ts";
+import { approach, clamp, mod } from "../../shared/core/math.ts";
 import { makeTerrainScratch, RAIL_LENGTH, type Route, type Station } from "./route.ts";
 
 /** Comfortable service acceleration and braking (m/s²). */

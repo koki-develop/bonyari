@@ -1,8 +1,9 @@
-import { hex, pack, type RGB } from "../../core/color.ts";
-import { Rng } from "../../core/random.ts";
+import { hex, pack, type RGB } from "../../../shared/core/color.ts";
+import { Rng } from "../../../shared/core/random.ts";
 import { crossingActive, crossingClosure } from "../../sim/crossing.ts";
 import type { Crossing } from "../../sim/route.ts";
-import type { Painter } from "../painter.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 
 const YELLOW: RGB = [236, 196, 40];
 const BLACK: RGB = [34, 32, 32];
@@ -14,7 +15,7 @@ const CAR_COLORS: readonly RGB[] = ["#e8e8e6", "#2a2c32", "#9a2c2a", "#3a5a8a", 
 
 /** Striped segment between two screen points. */
 function stripedLine(
-  p: Painter,
+  p: Painter<Camera>,
   x0: number,
   y0: number,
   x1: number,
@@ -43,7 +44,7 @@ export function crossingLampPhase(time: number): number {
  * bell on top, twin round lamps on black backplates under their visors, and
  * the arrow box showing which way the train comes from.
  */
-function warningPost(p: Painter, along: number, active: boolean, time: number): void {
+function warningPost(p: Painter<Camera>, along: number, active: boolean, time: number): void {
   const s = p.s;
   const cx = p.x(along);
   const Y = (h: number) => p.cam.yRail(p.lateral, h);
@@ -116,7 +117,7 @@ function warningPost(p: Painter, along: number, active: boolean, time: number): 
 }
 
 export function drawCrossing(
-  p: Painter,
+  p: Painter<Camera>,
   crossing: Crossing,
   lateral: number,
   pos: number,
@@ -165,7 +166,12 @@ export function drawCrossing(
  * grille between the headlamps, the windshield reflecting the sky over the
  * dark cabin, tyres showing under the body. Its headlights shine at us at night.
  */
-export function drawWaitingCar(p: Painter, crossing: Crossing, lateral: number, pos: number): void {
+export function drawWaitingCar(
+  p: Painter<Camera>,
+  crossing: Crossing,
+  lateral: number,
+  pos: number,
+): void {
   const closure = crossingClosure(crossing, pos);
   if (closure < 0.3) {
     return;

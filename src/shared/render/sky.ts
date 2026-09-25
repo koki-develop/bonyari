@@ -2,11 +2,10 @@ import { pack } from "../core/color.ts";
 import { clamp01, lerp, smoothstep } from "../core/math.ts";
 import { hash, hash2, hashU32, noise2, Rng } from "../core/random.ts";
 import { bayer, type Surface } from "../core/surface.ts";
-import { LATITUDE, type HorizonVector } from "../sim/astro.ts";
-import { makeTerrainScratch } from "../sim/route.ts";
-import type { LightningStrike } from "../sim/weather.ts";
-import type { World } from "../sim/world.ts";
-import type { Camera } from "./camera.ts";
+import { LATITUDE, type HorizonVector } from "../env/astro.ts";
+import type { LightningStrike } from "../env/weather.ts";
+import type { Environment } from "../env/environment.ts";
+import type { Pinhole } from "./pinhole.ts";
 import type { Cover } from "./cover.ts";
 import type { Lighting } from "./lighting.ts";
 
@@ -58,8 +57,7 @@ function buildCloudTexture(seed: number): Float32Array {
 
 /**
  * Unit view directions of the sky pixels, and the length of their horizontal
- * part. They depend only on the camera, so they are kept until it changes
- * (the heading turns only between sections).
+ * part. They depend only on the camera, so they are kept until it moves.
  */
 class SkyDirections {
   e = new Float64Array(0);
@@ -68,7 +66,7 @@ class SkyDirections {
   horizontal = new Float64Array(0);
   private key = "";
 
-  update(cam: Camera, width: number, rows: number): void {
+  update(cam: Pinhole, width: number, rows: number): void {
     const key = `${width} ${rows} ${cam.cx} ${cam.focal} ${cam.horizon} ${cam.heading}`;
     if (key === this.key) {
       return;
@@ -131,9 +129,9 @@ export class SkyRenderer {
   private strikesSeen = 0;
   private readonly seed: number;
 
-  constructor(world: World) {
-    this.seed = world.seed;
-    const stars = world.stars;
+  constructor(env: Environment) {
+    this.seed = env.seed;
+    const stars = env.stars;
     const n = stars.length;
     this.starX = new Float32Array(n);
     this.starY = new Float32Array(n);
@@ -155,17 +153,17 @@ export class SkyRenderer {
       );
       this.starHaze[i] = s.haze ? 1 : 0;
     });
-    this.cloudTex = buildCloudTexture(world.seed ^ 0xc10d);
+    this.cloudTex = buildCloudTexture(env.seed ^ 0xc10d);
   }
 
-  update(dt: number, world: World): void {
-    const w = world.weather.state;
+  update(dt: number, env: Environment): void {
+    const w = env.weather.state;
     const speed = 4 + w.wind * 14;
     this.windX += speed * 0.8 * dt;
     this.windY += speed * 0.35 * dt;
-    if (world.weather.strikeCount !== this.strikesSeen) {
-      this.strikesSeen = world.weather.strikeCount;
-      this.strike = world.weather.lastStrike;
+    if (env.weather.strikeCount !== this.strikesSeen) {
+      this.strikesSeen = env.weather.strikeCount;
+      this.strike = env.weather.lastStrike;
       this.strikeAge = 0;
     }
     this.strikeAge += dt;
@@ -177,34 +175,34 @@ export class SkyRenderer {
    */
   render(
     view: Surface,
-    cam: Camera,
-    world: World,
+    cam: Pinhole,
+    env: Environment,
     light: Lighting,
     time: number,
     cover: Cover,
     hidden: Uint8Array,
   ): void {
-    this.dirs.update(cam, view.width, Math.min(view.height, Math.ceil(cam.horizon) + 2));
+    this.dirs.update(cam, view.width, skyRows(view, cam));
     this.cover = cover;
     this.hidden = hidden;
-    this.gradient(view, cam, world, light);
-    this.stars(view, cam, world, light, time);
-    this.airplanes(view, cam, world, light, time);
-    this.shootingStars(view, cam, world, light);
-    this.sun(view, cam, world, light);
-    this.moon(view, cam, world, light);
-    this.thunderheads(view, cam, world, light);
-    this.clouds(view, cam, world, light);
-    this.lightning(view, cam, world);
+    this.gradient(view, cam, env, light);
+    this.stars(view, cam, env, light, time);
+    this.airplanes(view, cam, env, light, time);
+    this.shootingStars(view, cam, env, light);
+    this.sun(view, cam, env, light);
+    this.moon(view, cam, env, light);
+    this.thunderheads(view, cam, env, light);
+    this.clouds(view, cam, env, light);
+    this.lightning(view, cam, env);
   }
 
-  private gradient(view: Surface, cam: Camera, world: World, light: Lighting): void {
+  private gradient(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
     const { zenith, horizon, sunGlow } = light;
-    const sun = world.sky.sun;
-    const sunUp = smoothstep(-12, -2, world.sky.sunAltitude);
-    const low = 1 - smoothstep(4, 30, world.sky.sunAltitude);
+    const sun = env.sky.sun;
+    const sunUp = smoothstep(-12, -2, env.sky.sunAltitude);
+    const low = 1 - smoothstep(4, 30, env.sky.sunAltitude);
     const sunHoriz = Math.hypot(sun.e, sun.n) || 1;
-    const rows = Math.min(view.height, Math.ceil(cam.horizon) + 2);
+    const rows = skyRows(view, cam);
     const data = view.data;
     const { e: dirE, n: dirN, u: dirU, horizontal: dirH } = this.dirs;
     const covered = this.cover.order;
@@ -260,12 +258,18 @@ export class SkyRenderer {
     }
   }
 
-  private stars(view: Surface, cam: Camera, world: World, light: Lighting, time: number): void {
+  private stars(
+    view: Surface,
+    cam: Pinhole,
+    env: Environment,
+    light: Lighting,
+    time: number,
+  ): void {
     const vis = light.starVisibility;
     if (vis <= 0.01) {
       return;
     }
-    const lst = world.sky.sidereal;
+    const lst = env.sky.sidereal;
     const cl = Math.cos(lst);
     const sl = Math.sin(lst);
     const sinLat = Math.sin(LATITUDE);
@@ -319,16 +323,16 @@ export class SkyRenderer {
     }
   }
 
-  private sun(view: Surface, cam: Camera, world: World, light: Lighting): void {
-    if (world.sky.sunAltitude < -1.5) {
+  private sun(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
+    if (env.sky.sunAltitude < -1.5) {
       return;
     }
-    const p = cam.projectDirection(world.sky.sun);
+    const p = cam.projectDirection(env.sky.sun);
     if (!p) {
       return;
     }
     const r = Math.max(2.2, cam.focal * 0.034);
-    const w = world.weather.state;
+    const w = env.weather.state;
     const through = clamp01(1 - w.cloudCover * 0.9);
     view.glow(p.x, p.y, r * 7, light.sunGlow, 0.35 * through);
     const [cr, cg, cb] = light.sunDisc;
@@ -345,8 +349,8 @@ export class SkyRenderer {
     }
   }
 
-  private moon(view: Surface, cam: Camera, world: World, light: Lighting): void {
-    const sky = world.sky;
+  private moon(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
+    const sky = env.sky;
     if (sky.moonAltitude < -1) {
       return;
     }
@@ -358,7 +362,7 @@ export class SkyRenderer {
     const sunCam = cam.toCamera(sky.sun);
     const daylight = light.daylight;
     const alpha = 1 - daylight * 0.72;
-    const w = world.weather.state;
+    const w = env.weather.state;
     const through = clamp01(1 - w.cloudCover * 0.8);
     if (daylight < 0.6) {
       view.glow(
@@ -400,11 +404,11 @@ export class SkyRenderer {
     }
   }
 
-  private thunderheads(view: Surface, cam: Camera, world: World, light: Lighting): void {
-    const w = world.weather.state;
-    const hour = world.clock.hour;
+  private thunderheads(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
+    const w = env.weather.state;
+    const hour = env.clock.hour;
     const amount =
-      world.season.thunderheads *
+      env.season.thunderheads *
       clamp01(1.2 - w.cloudCover) *
       smoothstep(11, 14, hour) *
       (1 - smoothstep(19.5, 21, hour));
@@ -414,7 +418,7 @@ export class SkyRenderer {
     const lateral = 28000;
     const spacing = 16000;
     const [a0, a1] = cam.alongRange(lateral, 60);
-    const sun = cam.toCamera(world.sky.sun);
+    const sun = cam.toCamera(env.sky.sun);
     const sunLen = Math.hypot(sun.right, sun.up, sun.forward) || 1;
     const lx = sun.right / sunLen;
     const ly = sun.up / sunLen;
@@ -611,8 +615,8 @@ export class SkyRenderer {
     }
   }
 
-  private clouds(view: Surface, cam: Camera, world: World, light: Lighting): void {
-    const w = world.weather.state;
+  private clouds(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
+    const w = env.weather.state;
     if (w.cloudCover < 0.02) {
       return;
     }
@@ -620,20 +624,19 @@ export class SkyRenderer {
     const cover = w.cloudCover;
     const th = lerp(0.8, 0.12, cover);
     const soft = 0.12 + cover * 0.1;
-    const sun = world.sky.sun;
+    const sun = env.sky.sun;
     const sh = Math.hypot(sun.e, sun.n) || 1;
     const su = (-sun.e / sh) * 2.2;
     const sv = (-sun.n / sh) * 2.2;
     const lit = light.cloudLit;
     const shade = light.cloudShade;
     const glow = light.sunGlow;
-    const pollution =
-      world.route.terrain(world.train.pos, TERRAIN).lightPollution * (1 - light.daylight);
+    const pollution = light.lightPollution * (1 - light.daylight);
     const shadeR = shade[0] + pollution * 34;
     const shadeG = shade[1] + pollution * 22;
     const shadeB = shade[2] + pollution * 10;
     const texScale = CLOUD_TEX / CLOUD_TILE;
-    const rows = Math.min(view.height, Math.ceil(cam.horizon));
+    const rows = Math.max(0, Math.min(view.height, Math.ceil(cam.horizon)));
     const pos = cam.pos;
     const data = view.data;
     const { e: dirE, n: dirN, u: dirU } = this.dirs;
@@ -695,8 +698,14 @@ export class SkyRenderer {
     }
   }
 
-  private airplanes(view: Surface, cam: Camera, world: World, light: Lighting, time: number): void {
-    for (const p of world.spectacle.airplanes) {
+  private airplanes(
+    view: Surface,
+    cam: Pinhole,
+    env: Environment,
+    light: Lighting,
+    time: number,
+  ): void {
+    for (const p of env.skyEvents.airplanes) {
       // Airplanes and meteors are placed relative to the view.
       const dir = skyDirection(p.az + cam.heading, p.alt);
       const s = cam.projectDirection(dir);
@@ -720,7 +729,7 @@ export class SkyRenderer {
         const trail = Math.round(12 + 10 * hash2(p.seed, 3));
         const back = p.dAz > 0 ? -1 : 1;
         for (let i = 1; i < trail; i++) {
-          const a = (1 - i / trail) * 0.55 * fade * (1 - world.weather.state.cloudCover);
+          const a = (1 - i / trail) * 0.55 * fade * (1 - env.weather.state.cloudCover);
           view.blend(s.x + back * i, s.y + i * 0.04, 245, 245, 250, a);
         }
         view.blend(s.x, s.y, 235, 238, 245, fade);
@@ -728,8 +737,8 @@ export class SkyRenderer {
     }
   }
 
-  private shootingStars(view: Surface, cam: Camera, world: World, light: Lighting): void {
-    for (const s of world.spectacle.shootingStars) {
+  private shootingStars(view: Surface, cam: Pinhole, env: Environment, light: Lighting): void {
+    for (const s of env.skyEvents.shootingStars) {
       const t = s.age / s.life;
       const at = (age: number) =>
         cam.projectDirection(skyDirection(cam.heading + s.az + s.dAz * age, s.alt + s.dAlt * age));
@@ -751,9 +760,9 @@ export class SkyRenderer {
     }
   }
 
-  private lightning(view: Surface, cam: Camera, world: World): void {
+  private lightning(view: Surface, cam: Pinhole, env: Environment): void {
     const s = this.strike;
-    const flash = world.weather.state.flash;
+    const flash = env.weather.state.flash;
     if (!s || !s.bolt || flash < 0.25 || this.strikeAge > 0.35) {
       return;
     }
@@ -770,7 +779,10 @@ export class SkyRenderer {
   }
 }
 
-const TERRAIN = makeTerrainScratch();
+/** Rows of the view down to just below the horizon; none when the horizon is above the view. */
+function skyRows(view: Surface, cam: Pinhole): number {
+  return Math.max(0, Math.min(view.height, Math.ceil(cam.horizon) + 2));
+}
 
 function sampleTex(tex: Float32Array, u: number, v: number): number {
   // The texture side is a power of two, so wrapping is a mask.

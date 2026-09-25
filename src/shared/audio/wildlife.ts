@@ -539,3 +539,56 @@ export const tsukutsukuboshi: Build = (ctx, noise, r) => {
     t += 0.36;
   }
 };
+
+/** Several distinct calls of each species. */
+export interface Wildlife {
+  uguisu: AudioBuffer[];
+  sparrow: AudioBuffer[];
+  hiyodori: AudioBuffer[];
+  shijukara: AudioBuffer[];
+  crow: AudioBuffer[];
+  frog: AudioBuffer[];
+  suzumushi: AudioBuffer[];
+  korogi: AudioBuffer[];
+  matsumushi: AudioBuffer[];
+  minmin: AudioBuffer[];
+  higurashi: AudioBuffer[];
+  tsukutsukuboshi: AudioBuffer[];
+}
+
+/** Renders every species several times over, each a little different. */
+export async function renderWildlife(
+  render: (seconds: number, build: Build) => Promise<AudioBuffer>,
+): Promise<Wildlife> {
+  const many = (count: number, seconds: number, build: Build) =>
+    Promise.all(Array.from({ length: count }, () => render(seconds, build)));
+  const pending: { [K in keyof Wildlife]: Promise<AudioBuffer[]> } = {
+    uguisu: Promise.all([0, 0, 1, 1, 2, 3].map((v) => render(3.2, uguisu(v)))),
+    sparrow: many(6, 1.8, sparrow),
+    hiyodori: many(4, 3.8, hiyodori),
+    shijukara: many(4, 2.8, shijukara),
+    crow: many(4, 4, crow),
+    frog: many(8, 1.5, frog),
+    suzumushi: many(5, 2.8, suzumushi),
+    korogi: many(5, 3.2, korogi),
+    matsumushi: many(3, 2.6, matsumushi),
+    minmin: many(4, 5.2, minmin),
+    higurashi: many(4, 3.2, higurashi),
+    tsukutsukuboshi: many(3, 6.2, tsukutsukuboshi),
+  };
+  // Everything renders at once; the awaits only collect the results.
+  return {
+    uguisu: await pending.uguisu,
+    sparrow: await pending.sparrow,
+    hiyodori: await pending.hiyodori,
+    shijukara: await pending.shijukara,
+    crow: await pending.crow,
+    frog: await pending.frog,
+    suzumushi: await pending.suzumushi,
+    korogi: await pending.korogi,
+    matsumushi: await pending.matsumushi,
+    minmin: await pending.minmin,
+    higurashi: await pending.higurashi,
+    tsukutsukuboshi: await pending.tsukutsukuboshi,
+  };
+}

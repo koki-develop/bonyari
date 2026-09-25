@@ -1,6 +1,13 @@
+import {
+  asRecord,
+  isCount,
+  isFiniteNumber,
+  isOneOf,
+  isUint32,
+} from "../../shared/core/validate.ts";
+import { readWeatherSnapshot, type WeatherSnapshot } from "../../shared/env/weather.ts";
 import { type RouteAnchor, SECTION_KINDS } from "./route.ts";
 import { TRAIN_PHASES, type TrainState } from "./train.ts";
-import { WEATHER_KINDS, type WeatherSnapshot } from "./weather.ts";
 
 /** A moment of a ride, enough to resume it there: see `World.snapshot` and `World.resume`. */
 export interface Journey {
@@ -14,26 +21,6 @@ export interface Journey {
 
 /** Version of the encoded form; records of any other version are not read. */
 const FORMAT = 1;
-
-type Levels = Omit<WeatherSnapshot["state"], "kind">;
-
-const WEATHER_LEVELS = [
-  "cloudCover",
-  "rain",
-  "snow",
-  "storm",
-  "wind",
-  "mist",
-  "visibility",
-  "snowCover",
-  "wetness",
-] as const satisfies readonly (keyof Levels)[];
-
-// Fails to compile when a weather level is missing from WEATHER_LEVELS.
-const LEVELS_COMPLETE: [Exclude<keyof Levels, (typeof WEATHER_LEVELS)[number]>] extends [never]
-  ? true
-  : never = true;
-void LEVELS_COMPLETE;
 
 export function encodeJourney(journey: Journey): string {
   return JSON.stringify({ format: FORMAT, journey });
@@ -58,7 +45,7 @@ function readJourney(value: unknown): Journey | null {
   }
   const route = readRoute(o.route);
   const train = readTrain(o.train);
-  const weather = readWeather(o.weather);
+  const weather = readWeatherSnapshot(o.weather);
   if (!isUint32(o.seed) || !isFiniteNumber(o.days) || !route || !train || !weather) {
     return null;
   }
@@ -103,55 +90,4 @@ function readTrain(value: unknown): TrainState | null {
     dwell: o.dwell,
     stationsVisited: o.stationsVisited,
   };
-}
-
-function readWeather(value: unknown): WeatherSnapshot | null {
-  const o = asRecord(value);
-  const s = asRecord(o?.state);
-  if (
-    !o ||
-    !s ||
-    !isUint32(o.rng) ||
-    !isFiniteNumber(o.remainingDays) ||
-    !isFiniteNumber(o.targetCloud) ||
-    !isFiniteNumber(o.targetPrecip) ||
-    !isOneOf(s.kind, WEATHER_KINDS)
-  ) {
-    return null;
-  }
-  const levels = {} as Levels;
-  for (const key of WEATHER_LEVELS) {
-    const level = s[key];
-    if (!isFiniteNumber(level)) {
-      return null;
-    }
-    levels[key] = level;
-  }
-  return {
-    rng: o.rng,
-    remainingDays: o.remainingDays,
-    targetCloud: o.targetCloud,
-    targetPrecip: o.targetPrecip,
-    state: { kind: s.kind, ...levels },
-  };
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isCount(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
-function isUint32(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffffffff;
-}
-
-function isOneOf<T extends string>(value: unknown, options: readonly T[]): value is T {
-  return (options as readonly unknown[]).includes(value);
 }

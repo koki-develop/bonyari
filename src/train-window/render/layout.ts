@@ -1,3 +1,5 @@
+import { pixelScale } from "../../shared/render/display.ts";
+
 export interface Rect {
   x: number;
   y: number;
@@ -32,7 +34,7 @@ export interface Layout {
 const SHORT_SIDE = 190;
 
 export function computeLayout(deviceWidth: number, deviceHeight: number): Layout {
-  const scale = Math.max(1, Math.round(Math.min(deviceWidth, deviceHeight) / SHORT_SIDE));
+  const scale = pixelScale(deviceWidth, deviceHeight, SHORT_SIDE);
   const width = Math.ceil(deviceWidth / scale);
   const height = Math.ceil(deviceHeight / scale);
   const portrait = height > width;

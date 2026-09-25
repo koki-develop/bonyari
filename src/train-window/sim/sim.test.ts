@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DEG } from "../core/math.ts";
-import { computeSky } from "./astro.ts";
-import { Clock, DAYS_PER_YEAR, formatClock } from "./clock.ts";
+import { DEG } from "../../shared/core/math.ts";
+import { computeSky } from "../../shared/env/astro.ts";
+import { Clock, DAYS_PER_YEAR, formatClock } from "../../shared/env/clock.ts";
 import { crossingActive, crossingClosure } from "./crossing.ts";
 import { decodeJourney, encodeJourney } from "./journey.ts";
 import { makeTerrainScratch, Route } from "./route.ts";
-import { computeSeason } from "./season.ts";
+import { computeRouteSeason } from "./season.ts";
 import { DECEL, DWELL, Train, type TrainEventType, type TrainPhase } from "./train.ts";
-import { World } from "./world.ts";
+import { TIMEKEEPING, World } from "./world.ts";
 
 describe("clock", () => {
   it("formats minutes as HH:MM and wraps at midnight", () => {
@@ -17,19 +17,19 @@ describe("clock", () => {
   });
 
   it("runs one day in five real minutes and one year in twelve days", () => {
-    const c = new Clock(0);
+    const c = new Clock(0, TIMEKEEPING);
     c.advance(150);
     expect(c.minuteOfDay).toBeCloseTo(720, 6);
     expect(DAYS_PER_YEAR).toBe(12);
-    expect(Clock.at(3, 0).season).toBe("summer");
-    expect(Clock.at(11.99, 0).season).toBe("winter");
+    // Summer starts a quarter of the way through the year.
+    expect(Clock.at(3, 0, TIMEKEEPING).yearFraction).toBeCloseTo(0.25, 9);
   });
 });
 
 describe("sky", () => {
   /** Finds the hour the sun crosses the horizon, scanning from `from`. */
   function crossing(day: number, from: number, rising: boolean): number {
-    const clock = Clock.at(day, 0);
+    const clock = Clock.at(day, 0, TIMEKEEPING);
     for (let m = from * 60; m < from * 60 + 720; m++) {
       const a = computeSky(clock.calendarDayOfYear, m / 60, day).sunAltitude;
       const b = computeSky(clock.calendarDayOfYear, (m + 1) / 60, day).sunAltitude;
@@ -51,7 +51,7 @@ describe("sky", () => {
   });
 
   it("puts the sun due south and highest at noon", () => {
-    const clock = Clock.at(4, 0);
+    const clock = Clock.at(4, 0, TIMEKEEPING);
     const sky = computeSky(clock.calendarDayOfYear, 12, 4);
     expect(sky.sun.e).toBeCloseTo(0, 6);
     expect(sky.sun.n).toBeLessThan(0);
@@ -61,7 +61,7 @@ describe("sky", () => {
   it("rises a full moon at sunset", () => {
     // Find a day where the phase is full, then check the moon is opposite the sun.
     for (let d = 0; d < 8; d += 0.01) {
-      const clock = Clock.at(d, 0);
+      const clock = Clock.at(d, 0, TIMEKEEPING);
       const sky = computeSky(clock.calendarDayOfYear, 18, d);
       if (Math.abs(sky.moonPhase - 0.5) < 0.005) {
         const dot = sky.sun.e * sky.moon.e + sky.sun.n * sky.moon.n + sky.sun.u * sky.moon.u;
@@ -75,11 +75,11 @@ describe("sky", () => {
 
 describe("season", () => {
   it("blooms cherries in spring and flooded paddies before summer", () => {
-    expect(computeSeason(0.1).blossom).toBeCloseTo(1, 5);
-    expect(computeSeason(0.6).blossom).toBe(0);
-    expect(computeSeason(0.21).paddyFlooded).toBeCloseTo(1, 5);
-    expect(computeSeason(0.43).warmth).toBeGreaterThan(0.95);
-    expect(computeSeason(0.9).warmth).toBeLessThan(0.05);
+    expect(computeRouteSeason(0.1).blossom).toBeCloseTo(1, 5);
+    expect(computeRouteSeason(0.6).blossom).toBe(0);
+    expect(computeRouteSeason(0.21).paddyFlooded).toBeCloseTo(1, 5);
+    expect(computeRouteSeason(0.43).warmth).toBeGreaterThan(0.95);
+    expect(computeRouteSeason(0.9).warmth).toBeLessThan(0.05);
   });
 });
 

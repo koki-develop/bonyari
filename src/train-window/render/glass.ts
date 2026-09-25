@@ -1,7 +1,7 @@
-import { pack, type RGB } from "../core/color.ts";
-import { clamp01, smoothstep } from "../core/math.ts";
-import { noise2, Rng } from "../core/random.ts";
-import type { Surface } from "../core/surface.ts";
+import { pack, type RGB } from "../../shared/core/color.ts";
+import { clamp01, smoothstep } from "../../shared/core/math.ts";
+import { noise2, Rng } from "../../shared/core/random.ts";
+import type { Surface } from "../../shared/core/surface.ts";
 import type { Rect } from "./layout.ts";
 
 interface Drop {

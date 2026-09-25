@@ -1,12 +1,12 @@
-import { mix, type RGB } from "../core/color.ts";
-import { clamp01, lerp, smoothstep } from "../core/math.ts";
-import { fbm1, hash2, hashU32, tileNoise } from "../core/random.ts";
-import { bayer, type Surface } from "../core/surface.ts";
+import { mix, type RGB } from "../../shared/core/color.ts";
+import { clamp01, lerp, smoothstep } from "../../shared/core/math.ts";
+import { fbm1, hash2, hashU32, tileNoise } from "../../shared/core/random.ts";
+import { bayer, type Surface } from "../../shared/core/surface.ts";
 import { makeTerrainScratch, type Route } from "../sim/route.ts";
 import type { World } from "../sim/world.ts";
 import type { Camera } from "./camera.ts";
-import type { Cover } from "./cover.ts";
-import type { Painter } from "./painter.ts";
+import type { Cover } from "../../shared/render/cover.ts";
+import type { Painter } from "../../shared/render/painter.ts";
 
 interface Ridge {
   lateral: number;
@@ -172,12 +172,12 @@ export class RidgeRenderer {
    * the sun's side, stands of evergreens among deciduous trees that take on
    * the colors of the season. Far ranges fade into the haze, snow on their tops.
    */
-  draw(ri: number, p: Painter, cover: Cover): void {
-    const { view, cam, world, light, shade } = p;
+  draw(ri: number, p: Painter<Camera>, cover: Cover): void {
+    const { view, cam, env, light, shade } = p;
     const ridge = RIDGES[ri];
     const heights = this.heights[ri];
-    const season = world.season;
-    const snow = world.weather.state.snowCover;
+    const season = env.season;
+    const snow = env.weather.state.snowCover;
     const snowline = lerp(650, 2800, smoothstep(0.05, 0.5, season.warmth));
     const evergreen = season.evergreen;
     const deciduous = mix(BARE, season.leaf, clamp01(season.leafDensity * 1.2));

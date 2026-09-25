@@ -1,14 +1,14 @@
-import { hex, type RGB } from "../../core/color.ts";
-import { clamp01, intervalCoverage, mod, pulseCoverage } from "../../core/math.ts";
-import { hash2, hash3 } from "../../core/random.ts";
-import type { Surface } from "../../core/surface.ts";
+import { hex, type RGB } from "../../../shared/core/color.ts";
+import { clamp01, intervalCoverage, mod, pulseCoverage } from "../../../shared/core/math.ts";
+import { hash2, hash3 } from "../../../shared/core/random.ts";
+import type { Surface } from "../../../shared/core/surface.ts";
 import type { Bridge, Span } from "../../sim/route.ts";
 import { type Camera, EYE_ABOVE_RAIL } from "../camera.ts";
 import { HALF_GAUGE, NEXT_TRACK } from "../ground.ts";
-import type { Cover } from "../cover.ts";
-import type { Painter } from "../painter.ts";
+import type { Cover } from "../../../shared/render/cover.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
 import { PORTAL_TOP, PORTAL_WALL_END, portalWallTop } from "./tunnel-hill.ts";
-import type { Shade } from "../shade.ts";
+import type { Shade } from "../../../shared/render/shade.ts";
 
 /** Trackside pole spacing (m) and their lateral distances for single and double track. */
 export const POLE_SPACING = 45;
@@ -252,7 +252,7 @@ export function coverBarrier(
  * @param spill how strongly the lit car shines out onto nearby walls (0..1)
  */
 export function drawBarrier(
-  p: Painter,
+  p: Painter<Camera>,
   height: (along: number) => number,
   gaps: readonly Span[],
   spill: number,
@@ -533,7 +533,11 @@ export function coverTunnel(cam: Camera, tunnels: readonly Span[], cover: Cover)
  * a refuge niche now and then. Sodium lamps streak past and our own windows
  * light the wall faintly.
  */
-export function drawTunnel(p: Painter, tunnels: readonly Span[], interiorSpill: number): void {
+export function drawTunnel(
+  p: Painter<Camera>,
+  tunnels: readonly Span[],
+  interiorSpill: number,
+): void {
   const { view, cam } = p;
   const lateral = TUNNEL_LATERAL;
   const footprint = cam.footprint(lateral);
@@ -617,7 +621,7 @@ export function drawTunnel(p: Painter, tunnels: readonly Span[], interiorSpill: 
  * and wing walls stepping down on either side. Each ray is followed to where
  * it crosses the plane of the portal; the hill above is `drawTunnelHills`.
  */
-function drawPortals(p: Painter, tunnels: readonly Span[]): void {
+function drawPortals(p: Painter<Camera>, tunnels: readonly Span[]): void {
   const { view, cam, shade } = p;
   for (const t of tunnels) {
     const masonry = hash2(Math.floor(t.start), 13) < 0.4;

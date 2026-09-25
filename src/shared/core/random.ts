@@ -64,6 +64,12 @@ export class Rng {
     return this.next() < p;
   }
 
+  /** A sample of the standard normal distribution. */
+  gaussian(): number {
+    const u = Math.max(1e-12, this.next());
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * this.next());
+  }
+
   pick<T>(items: readonly T[]): T {
     return items[Math.floor(this.next() * items.length)];
   }

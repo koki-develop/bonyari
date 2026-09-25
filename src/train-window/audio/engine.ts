@@ -1,21 +1,16 @@
-import { bump, clamp01, cyclicBump, smoothstep } from "../core/math.ts";
-import { hash2, noise1, Rng } from "../core/random.ts";
+import { bump, clamp01, smoothstep } from "../../shared/core/math.ts";
+import { hash2, noise1 } from "../../shared/core/random.ts";
 import { crossingActive } from "../sim/crossing.ts";
 import { type Crossing, makeTerrainScratch, RAIL_LENGTH } from "../sim/route.ts";
 import { ONCOMING_CAR_LENGTH, type OncomingTrain } from "../sim/traffic.ts";
 import { AXLES } from "../sim/train.ts";
 import type { World } from "../sim/world.ts";
+import { daytime, WildlifeChorus } from "../../shared/audio/chorus.ts";
+import { AudioEngineBase, type Loop, MAX_CADENCE } from "../../shared/audio/engine-base.ts";
 import { buildSoundBank, type SoundBank } from "./bank.ts";
-import { chain, filter, gainNode, impulseResponse } from "./synth.ts";
+import { chain, filter, gainNode, impulseResponse } from "../../shared/audio/synth.ts";
 
 const SPEED_OF_SOUND = 343;
-/** Margin (s) by which events are scheduled ahead of the next update. */
-const LOOKAHEAD = 0.15;
-/** Seconds over which a longer spacing between updates is forgotten once they come faster again. */
-const CADENCE_MEMORY = 5;
-/** Longest update spacing (s) planned for; longer gaps are stalls, not a rhythm to cover. */
-const MAX_CADENCE = 2;
-const MASTER_LEVEL = 0.8;
 /** Lateral distance (m) of the crossing bells from our seat. */
 const BELL_LATERAL = 4;
 /** Strikes per second of a crossing bell. */
@@ -27,12 +22,6 @@ const SQUEAL_PITCH = 2700;
 /** Speed (m/s) below which the brakes start to squeal. */
 const SQUEAL_SPEED = 6;
 
-interface Loop {
-  source: AudioBufferSourceNode;
-  filter: BiquadFilterNode;
-  gain: GainNode;
-}
-
 interface BellState {
   next: number;
   parity: number;
@@ -43,13 +32,8 @@ interface BellState {
  * joints, stations, crossings, weather, and the life outside that is heard
  * best when the train stands still.
  */
-export class AudioEngine {
-  private ctx: AudioContext | null = null;
-  private bank: SoundBank | null = null;
-  private readonly rng: Rng;
-  private readonly seed: number;
-  private enabled = true;
-  private master!: GainNode;
+export class AudioEngine extends AudioEngineBase<SoundBank> {
+  private readonly chorus: WildlifeChorus;
   private trainBus!: GainNode;
   private cabinBus!: GainNode;
   private outsideBus!: GainNode;
@@ -74,24 +58,12 @@ export class AudioEngine {
   /** Number of car boundaries of each passing train that have gone by. */
   private readonly oncomingPassed = new Map<OncomingTrain, number>();
   private readonly terrain = makeTerrainScratch();
-  /** The call each species made last, so it doesn't repeat straight away. */
-  private readonly lastCall = new Map<readonly AudioBuffer[], number>();
   private wasInTunnel = false;
   private nextCreak = 20;
-  /** Audio time of the previous update. */
-  private lastUpdate = Number.NaN;
-  /** Recent longest spacing (s) between updates on the audio clock. */
-  private cadence = 0;
-  /** How far ahead (s) events are scheduled. */
-  private lookahead = LOOKAHEAD;
 
   constructor(seed: number) {
-    this.seed = seed;
-    this.rng = new Rng(seed ^ 0xa0d10);
-  }
-
-  get ready(): boolean {
-    return this.bank !== null;
+    super(seed, 0xa0d10);
+    this.chorus = new WildlifeChorus(seed);
   }
 
   private resync(world: World): void {
@@ -102,80 +74,13 @@ export class AudioEngine {
     this.oncomingPassed.clear();
     this.bells.clear();
     this.wasInTunnel = world.route.tunnelAt(pos) !== null;
-    this.lastUpdate = Number.NaN;
   }
 
-  /**
-   * Schedules far enough ahead to bridge the gap until the next update. A
-   * hidden page updates from a timer, which the browser may slow to one tick a
-   * second.
-   */
-  private trackCadence(now: number): void {
-    const gap = now - this.lastUpdate;
-    if (gap > 0) {
-      this.cadence = Math.min(
-        MAX_CADENCE,
-        Math.max(gap, this.cadence * Math.exp(-gap / CADENCE_MEMORY)),
-      );
-    }
-    this.lastUpdate = now;
-    this.lookahead = LOOKAHEAD + this.cadence;
+  protected buildBank(sampleRate: number): Promise<SoundBank> {
+    return buildSoundBank(sampleRate, this.seed);
   }
 
-  /**
-   * Retries a resume after the system interrupted audio, as phones do while
-   * the page is in the background. Some browsers only allow it from a user gesture.
-   */
-  wake(): void {
-    const ctx = this.ctx;
-    if (ctx && this.enabled && ctx.state !== "running") {
-      void ctx.resume();
-    }
-  }
-
-  /** Must be called from a user gesture so the browser lets audio play. */
-  async start(): Promise<void> {
-    if (this.ctx) {
-      return;
-    }
-    const ctx = new AudioContext({ latencyHint: "interactive" });
-    this.ctx = ctx;
-    void ctx.resume();
-    this.buildGraph(ctx);
-    this.bank = await buildSoundBank(ctx.sampleRate, this.seed);
-    this.startLoops(ctx, this.bank);
-    this.master.gain.setTargetAtTime(this.enabled ? MASTER_LEVEL : 0, ctx.currentTime, 1.2);
-  }
-
-  setEnabled(on: boolean): void {
-    this.enabled = on;
-    const ctx = this.ctx;
-    if (!ctx) {
-      return;
-    }
-    if (on) {
-      void ctx.resume();
-      this.master.gain.setTargetAtTime(MASTER_LEVEL, ctx.currentTime, 0.25);
-    } else {
-      this.master.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
-      window.setTimeout(() => {
-        if (!this.enabled) {
-          void ctx.suspend();
-        }
-      }, 600);
-    }
-  }
-
-  private buildGraph(ctx: AudioContext): void {
-    const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.value = -16;
-    compressor.ratio.value = 3;
-    compressor.attack.value = 0.01;
-    compressor.release.value = 0.3;
-    this.master = ctx.createGain();
-    this.master.gain.value = 0;
-    chain(this.master, compressor, ctx.destination);
-
+  protected buildGraph(ctx: AudioContext): void {
     this.trainBus = ctx.createGain();
     this.trainBus.connect(this.master);
     this.cabinBus = ctx.createGain();
@@ -197,28 +102,7 @@ export class AudioEngine {
     chain(this.stationSend, platformVerb, this.outsideBus);
   }
 
-  private loop(
-    ctx: AudioContext,
-    buffer: AudioBuffer,
-    type: BiquadFilterType,
-    freq: number,
-    q: number,
-    out: AudioNode,
-  ): Loop {
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.loop = true;
-    source.loopStart = 0;
-    source.loopEnd = buffer.duration;
-    const f = filter(ctx, type, freq, q);
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-    chain(source, f, gain, out);
-    source.start(ctx.currentTime, this.rng.next() * buffer.duration * 0.9);
-    return { source, filter: f, gain };
-  }
-
-  private startLoops(ctx: AudioContext, bank: SoundBank): void {
+  protected startLoops(ctx: AudioContext, bank: SoundBank): void {
     const { white, pink, brown } = bank.noise;
     this.rolling = this.loop(ctx, brown, "lowpass", 300, 0.7, this.trainBus);
     this.hiss = this.loop(ctx, pink, "bandpass", 1100, 0.6, this.trainBus);
@@ -318,34 +202,6 @@ export class AudioEngine {
     air.gain.gain.value = 0.02;
   }
 
-  private play(
-    buffer: AudioBuffer,
-    when: number,
-    gain: number,
-    out: AudioNode,
-    pan = 0,
-    rate = 1,
-  ): AudioBufferSourceNode | null {
-    const ctx = this.ctx;
-    if (!ctx || ctx.state !== "running" || gain <= 0.0005) {
-      return null;
-    }
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.playbackRate.value = rate;
-    const g = ctx.createGain();
-    g.gain.value = gain;
-    if (pan !== 0) {
-      const p = ctx.createStereoPanner();
-      p.pan.value = Math.max(-1, Math.min(1, pan));
-      chain(src, g, p, out);
-    } else {
-      chain(src, g, out);
-    }
-    src.start(Math.max(ctx.currentTime, when));
-    return src;
-  }
-
   /** The switch of the car lights. */
   playClick(): void {
     if (this.bank && this.ctx) {
@@ -355,19 +211,14 @@ export class AudioEngine {
 
   /** Follows the world after it advanced by `elapsed` real seconds. */
   update(world: World, elapsed: number): void {
-    const ctx = this.ctx;
-    const bank = this.bank;
-    if (!ctx || !bank) {
-      return;
-    }
-    if (ctx.state !== "running") {
-      // Muted or interrupted: keep the event cursors at the present so nothing
-      // that happened meanwhile plays all at once on resume.
+    const run = this.running();
+    if (!run) {
+      // Muted, interrupted or not started: keep the event cursors at the present
+      // so nothing that happened meanwhile plays all at once on resume.
       this.resync(world);
       return;
     }
-    const now = ctx.currentTime;
-    this.trackCadence(now);
+    const { bank, now } = run;
     // Chance events (birds, drops, creaks) are drawn for one cadence at most:
     // a stall's worth would all sound at once.
     const dt = Math.min(elapsed, MAX_CADENCE);
@@ -382,7 +233,7 @@ export class AudioEngine {
       : 0;
     const bridge = route.bridgeAt(train.pos);
     const onTruss = bridge?.kind === "truss" ? 1 : 0;
-    const weather = world.weather.state;
+    const weather = world.env.weather.state;
     const T = 0.12;
 
     // Rolling noise, hiss and rumble grow with speed; tunnels roar.
@@ -434,11 +285,10 @@ export class AudioEngine {
     const sea = Number.isFinite(shore) ? Math.exp(-shore / 140) : 0;
     this.waves.gain.gain.setTargetAtTime(sea * 0.35, now, 1);
 
-    const hour = world.clock.hour;
-    const season = world.season;
+    const hour = world.env.clock.hour;
+    const season = world.env.season;
     const rural = clamp01(terrain.fields + terrain.forest);
-    const day = smoothstep(5, 7, hour) * (1 - smoothstep(17.5, 19, hour));
-    const night = 1 - smoothstep(4.5, 6, hour) + smoothstep(18.5, 20, hour);
+    const day = daytime(hour);
     this.cicadas.gain.gain.setTargetAtTime(
       0.03 *
         season.cicadas *
@@ -463,7 +313,14 @@ export class AudioEngine {
     this.updateOncoming(world, now);
     this.stationEvents(world, now);
     this.weatherEvents(world, now, dt, shelter);
-    this.wildlife(world, now, dt, rural, day, night, inTunnel);
+    this.chorus.update(
+      world.env,
+      bank.wildlife,
+      { rural, houses: terrain.houses, fields: terrain.fields },
+      dt,
+      1 - inTunnel,
+      (call, gain, pan, rate) => this.play(call, now, gain, this.outsideBus, pan, rate),
+    );
     this.fireworks(world, now);
 
     this.nextCreak -= dt;
@@ -668,8 +525,8 @@ export class AudioEngine {
 
   private weatherEvents(world: World, now: number, dt: number, shelter: number): void {
     const bank = this.bank!;
-    const w = world.weather.state;
-    for (const strike of world.strikes) {
+    const w = world.env.weather.state;
+    for (const strike of world.env.strikes) {
       const near = strike.distance < 3000;
       const gain = 0.7 * Math.min(1, Math.pow(1500 / strike.distance, 0.7));
       this.play(
@@ -694,116 +551,6 @@ export class AudioEngine {
         this.rng.range(-0.8, 0.8),
       );
     }
-  }
-
-  private wildlife(
-    world: World,
-    now: number,
-    dt: number,
-    rural: number,
-    day: number,
-    night: number,
-    tunnel: number,
-  ): void {
-    const bank = this.bank!;
-    const season = world.season;
-    const hour = world.clock.hour;
-    const r = this.rng;
-    if (tunnel > 0.95) {
-      return;
-    }
-    const w = world.weather.state;
-    const dry = 1 - smoothstep(0.05, 0.35, w.rain);
-    const noSnow = 1 - smoothstep(0.02, 0.2, w.snow);
-    const calm = (1 - w.storm) * (1 - smoothstep(0.45, 0.85, w.wind));
-    // Birds sing on fine mornings, not in snow, rain or a gale; a grey sky subdues them.
-    const birds = dry * noSnow * calm * (1 - 0.45 * w.cloudCover) * (1 - 0.6 * w.mist);
-    // Cicadas need warmth and some sun.
-    const cicadas = dry * noSnow * calm * (1 - 0.7 * smoothstep(0.5, 1, w.cloudCover));
-    // Frogs call all the more in a light rain, but not in a downpour or the cold.
-    const frogs =
-      (1 + 0.8 * Math.min(w.rain, 0.5)) * (1 - smoothstep(0.6, 1, w.rain)) * noSnow * (1 - w.storm);
-    // Autumn insects fall silent in rain and wind.
-    const insects = (1 - smoothstep(0.1, 0.4, w.rain)) * noSnow * calm;
-    const chance = (rate: number) => r.chance(rate * dt * (1 - tunnel));
-    const call = (
-      calls: readonly AudioBuffer[],
-      rate: number,
-      gain: readonly [number, number],
-      pitch: readonly [number, number] = [0.97, 1.03],
-    ) => {
-      if (chance(rate)) {
-        this.play(
-          this.fresh(calls),
-          now,
-          r.range(gain[0], gain[1]),
-          this.outsideBus,
-          r.range(-0.9, 0.9),
-          r.range(pitch[0], pitch[1]),
-        );
-      }
-    };
-    const calls = bank.wildlife;
-    const f = season.yearFraction;
-    const terrain = world.route.terrain(world.train.pos, this.terrain);
-    const morning = bump(hour, 7, 4, 1.5);
-    const dawnDusk = bump(hour, 6, 1.5, 0.8) + bump(hour, 17.4, 1.6, 0.8);
-    // Spring mornings in the country: the bush warbler.
-    call(
-      calls.uguisu,
-      0.09 * birds * cyclicBump(f, 0.12, 0.2, 0.05, 1) * morning * rural,
-      [0.04, 0.09],
-    );
-    // Great tits through spring and early summer.
-    call(
-      calls.shijukara,
-      0.07 * birds * cyclicBump(f, 0.2, 0.18, 0.06, 1) * morning * (0.4 + 0.6 * rural),
-      [0.02, 0.05],
-    );
-    // Bulbuls all year, loudest in the morning.
-    call(calls.hiyodori, 0.06 * birds * (0.3 + 0.7 * morning) * day, [0.02, 0.05]);
-    // Sparrows around the houses through the day.
-    call(
-      calls.sparrow,
-      0.35 *
-        birds *
-        (0.4 + 0.6 * season.warmth) *
-        day *
-        (0.3 + terrain.houses) *
-        (1 - season.cicadas * 0.5),
-      [0.02, 0.05],
-      [0.95, 1.1],
-    );
-    // Crows at dawn and dusk, often some way off.
-    call(calls.crow, 0.05 * birds * dawnDusk, [0.015, 0.045], [0.94, 1.06]);
-    // Cicadas: robust cicadas by day, evening cicadas at dusk and dawn, and
-    // the "tsuku-tsuku-booshi" as summer ends.
-    const lateSummer = cyclicBump(f, 0.5, 0.05, 0.03, 1);
-    call(
-      calls.minmin,
-      0.12 * cicadas * season.cicadas * (1 - lateSummer * 0.6) * day * rural,
-      [0.03, 0.06],
-    );
-    call(calls.tsukutsukuboshi, 0.06 * cicadas * lateSummer * day * rural, [0.03, 0.06]);
-    const dusk = bump(hour, 18.2, 1.2, 0.6) + bump(hour, 5, 0.8, 0.5);
-    call(calls.higurashi, 0.15 * cicadas * season.cicadas * dusk * rural, [0.03, 0.06]);
-    call(calls.frog, 7 * frogs * season.frogs * night * terrain.fields, [0.01, 0.04], [0.85, 1.2]);
-    // Autumn insects: bell crickets, field crickets and pine crickets.
-    const insectRate = 3 * insects * season.crickets * night * rural;
-    call(calls.suzumushi, insectRate * 0.5, [0.01, 0.035]);
-    call(calls.korogi, insectRate * 0.35, [0.01, 0.035]);
-    call(calls.matsumushi, insectRate * 0.15, [0.01, 0.03]);
-  }
-
-  /** A call from `calls`, never the same one twice in a row. */
-  private fresh(calls: readonly AudioBuffer[]): AudioBuffer {
-    const last = this.lastCall.get(calls);
-    let i = this.rng.int(0, calls.length - (last === undefined ? 1 : 2));
-    if (last !== undefined && i >= last) {
-      i++;
-    }
-    this.lastCall.set(calls, i);
-    return calls[i];
   }
 
   private fireworks(world: World, now: number): void {

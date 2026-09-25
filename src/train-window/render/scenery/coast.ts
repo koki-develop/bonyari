@@ -1,11 +1,12 @@
-import type { RGB } from "../../core/color.ts";
-import { fbm1, Rng } from "../../core/random.ts";
-import type { Painter } from "../painter.ts";
+import type { RGB } from "../../../shared/core/color.ts";
+import { fbm1, Rng } from "../../../shared/core/random.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
+import type { Camera } from "../camera.ts";
 import type { Scenery } from "./placement.ts";
 
 const FISHING_LIGHT: RGB = [255, 244, 210];
 
-export function drawBoat(p: Painter, o: Scenery): void {
+export function drawBoat(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;
@@ -41,7 +42,7 @@ export function drawBoat(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawIsland(p: Painter, o: Scenery): void {
+export function drawIsland(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const width = r.range(1500, 5000);
@@ -57,7 +58,7 @@ export function drawIsland(p: Painter, o: Scenery): void {
   }
 }
 
-export function drawLighthouse(p: Painter, o: Scenery): void {
+export function drawLighthouse(p: Painter<Camera>, o: Scenery): void {
   const r = new Rng(o.seed);
   p.at(o.lateral);
   const s = p.s;

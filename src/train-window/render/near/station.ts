@@ -1,14 +1,14 @@
-import { hex, mix, type RGB, scale } from "../../core/color.ts";
-import { clamp01, intervalCoverage, pulseCoverage } from "../../core/math.ts";
-import { hash3, Rng } from "../../core/random.ts";
-import type { Surface } from "../../core/surface.ts";
+import { hex, mix, type RGB, scale } from "../../../shared/core/color.ts";
+import { clamp01, intervalCoverage, pulseCoverage } from "../../../shared/core/math.ts";
+import { hash3, Rng } from "../../../shared/core/random.ts";
+import type { Surface } from "../../../shared/core/surface.ts";
 import type { Station } from "../../sim/route.ts";
 import { EYE_ABOVE_RAIL, type Camera } from "../camera.ts";
-import type { Cover } from "../cover.ts";
-import type { Painter } from "../painter.ts";
+import type { Cover } from "../../../shared/render/cover.ts";
+import type { Painter } from "../../../shared/render/painter.ts";
 import { vendingMachine } from "../scenery/facade.ts";
 import { drawPerson } from "./people.ts";
-import type { Shade } from "../shade.ts";
+import type { Shade } from "../../../shared/render/shade.ts";
 
 export const PLATFORM_EDGE = 1.65;
 export const PLATFORM_HEIGHT = 1.1;
@@ -25,7 +25,7 @@ const STATION_COLORS: readonly RGB[] = ["#2e7d5b", "#2f63a8", "#b44a3a", "#6a5a9
 
 /** Rows of glyph-like strokes: text too small to read from a moving train. */
 function pseudoText(
-  p: Painter,
+  p: Painter<Camera>,
   x0: number,
   y0: number,
   x1: number,
@@ -52,7 +52,7 @@ function pseudoText(
 
 /** Like `pseudoText`, in emissive LED dots. */
 function pseudoTextLit(
-  p: Painter,
+  p: Painter<Camera>,
   x0: number,
   y0: number,
   x1: number,
@@ -516,7 +516,7 @@ const BINS: readonly RGB[] = [
   [200, 80, 60],
 ];
 
-export function drawPlatformItem(p: Painter, item: PlatformItem): void {
+export function drawPlatformItem(p: Painter<Camera>, item: PlatformItem): void {
   const r = new Rng(item.seed);
   const lamps = p.light.lamps;
   switch (item.kind) {
@@ -586,7 +586,7 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
         }
       }
       // Hands show the in-world time.
-      const hour = p.world.clock.hour;
+      const hour = p.env.clock.hour;
       const hands: [number, number][] = [
         [(hour % 12) / 12, 0.5],
         [(hour % 1) / 1, 0.8],
@@ -855,7 +855,7 @@ export function drawPlatformItem(p: Painter, item: PlatformItem): void {
       const x0 = p.x(item.along - 0.45);
       const x1 = p.x(item.along + 0.45);
       p.rect(x0, Y(0.45), x1, Y(0), [168, 110, 80]);
-      const season = p.world.season;
+      const season = p.env.season;
       const flower: RGB =
         season.warmth > 0.3
           ? r.pick<RGB>([
