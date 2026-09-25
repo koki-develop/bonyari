@@ -2,6 +2,7 @@ import { mix, type RGB } from "../../shared/core/color.ts";
 import type { Surface } from "../../shared/core/surface.ts";
 import type { Lighting } from "../../shared/render/lighting.ts";
 import type { Pinhole } from "../../shared/render/pinhole.ts";
+import type { Extent } from "./layout.ts";
 import { CLAY, LOAM, TOPSOIL } from "./palette.ts";
 
 /** What every layer of a frame draws with. */
@@ -10,6 +11,8 @@ export interface Frame {
   /** Screen column of x = 0 and row of y = 0: one pixel to the millimeter. */
   cx: number;
   ground: number;
+  /** All of the section the view can show, however it is zoomed and moved. */
+  extent: Extent;
   /** Seconds of animation. */
   time: number;
   /** Channel multipliers for the light on what is drawn: the time of day above ground, steady below it. */

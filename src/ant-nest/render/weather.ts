@@ -1,16 +1,22 @@
 import type { RGB } from "../../shared/core/color.ts";
 import { clamp01, mod, smoothstep } from "../../shared/core/math.ts";
-import { hash2, hash3, noise1 } from "../../shared/core/random.ts";
+import { hash3, noise1 } from "../../shared/core/random.ts";
 import type { World } from "../sim/world.ts";
-import { type Frame, sy } from "./frame.ts";
+import { type Frame, sx, sy } from "./frame.ts";
 
-/** Streaks of rain on screen at the heaviest rain, and flakes of snow. */
+/** Width (mm) of the stretch of the section that holds one set of drops, flakes and fireflies. */
+const TILE = 240;
+/**
+ * Streaks of rain in a stretch at the heaviest rain, flakes of snow in every
+ * `FLAKE_FALL` mm of their fall, and fireflies.
+ */
 const DROPS = 260;
 const FLAKES = 220;
-/** Fall speeds (px/s) of rain and snow, near. */
+const FLAKE_FALL = 420;
+const FIREFLIES = 12;
+/** Fall speeds (mm/s) of rain and snow, near. */
 const RAIN_FALL = 420;
 const SNOW_FALL = 26;
-const FIREFLIES = 12;
 
 const RAIN: RGB = [196, 206, 220];
 const SNOW: RGB = [240, 244, 250];
@@ -19,7 +25,8 @@ const SNOW: RGB = [240, 244, 250];
  * Rain and snow over the ground, falling to where the ground meets the cut
  * and splashing there; the snow lying on the ground, cut through along the
  * edge; fireflies over the grass on early summer nights. Every particle's
- * place is a function of time and its index, so dropped frames lose nothing.
+ * place in the section is a function of time and its index, so dropped
+ * frames lose nothing and the weather stays put as the view moves.
  */
 export function drawWeather(f: Frame, world: World): void {
   const w = world.env.weather.state;
@@ -32,88 +39,111 @@ export function drawWeather(f: Frame, world: World): void {
   fireflies(f, world);
 }
 
+/**
+ * Calls `each` with the index of every stretch of the section `TILE` wide
+ * that comes within `margin` mm of the view.
+ */
+function stretches(f: Frame, margin: number, each: (k: number) => void): void {
+  const left = -f.cx - margin;
+  const right = f.view.width - f.cx + margin;
+  for (let k = Math.floor(left / TILE); k * TILE < right; k++) {
+    each(k);
+  }
+}
+
 function rain(f: Frame, world: World, amount: number, wind: number): void {
   const view = f.view;
-  const count = Math.round(DROPS * amount * (view.width / 240));
+  const count = Math.round(DROPS * amount);
   const light = f.lighting;
   const glow = 0.45 + 0.55 * light.daylight;
-  const top = -20;
-  for (let i = 0; i < count; i++) {
-    const h0 = hash2(i, 71);
-    const h1 = hash2(i, 72);
-    const near = 0.45 + 0.55 * hash2(i, 73);
-    const speed = RAIN_FALL * near;
-    const x0 = h1 * (view.width + 40) - 20;
-    const drift = wind * 90 * near;
-    // Each drop falls from above the view to the ground, then starts again.
-    const x = x0 + drift * ((f.time * 0.37 + h0) % 1);
-    const groundY = sy(f, world.surface.height(x - f.cx));
-    const span = groundY - top;
-    const cycle = span / speed + 0.08;
-    const t = mod(f.time + h0 * cycle, cycle);
-    const y = top + t * speed;
-    const len = 3 + 4 * near;
-    if (y > groundY) {
-      // A splash on the ground for a moment.
-      const since = (y - groundY) / speed;
-      if (since < 0.06 && near > 0.6) {
-        const a = 0.6 * (1 - since / 0.06);
-        for (const dx of [-1, 1]) {
-          view.blend(
-            x + dx * (1 + since * 30),
-            groundY - 1 - since * 20,
-            RAIN[0] * glow,
-            RAIN[1] * glow,
-            RAIN[2] * glow,
-            a,
-          );
+  // Each drop falls from above the highest the view can show to the ground, then starts again.
+  const top = f.extent.top + 20;
+  const drift = wind * 90;
+  stretches(f, Math.abs(drift) + 20, (k) => {
+    for (let i = 0; i < count; i++) {
+      const h0 = hash3(i, k, 71);
+      const h1 = hash3(i, k, 72);
+      const near = 0.45 + 0.55 * hash3(i, k, 73);
+      const speed = RAIN_FALL * near;
+      const x = (k + h1) * TILE + drift * near * ((f.time * 0.37 + h0) % 1);
+      const ground = world.surface.height(x);
+      const cycle = (top - ground) / speed + 0.08;
+      const t = mod(f.time + h0 * cycle, cycle);
+      const y = top - t * speed;
+      const col = sx(f, x);
+      const groundY = sy(f, ground);
+      if (y < ground) {
+        // A splash on the ground for a moment.
+        const since = (ground - y) / speed;
+        if (since < 0.06 && near > 0.6) {
+          const a = 0.6 * (1 - since / 0.06);
+          for (const dx of [-1, 1]) {
+            view.blend(
+              col + dx * (1 + since * 30),
+              groundY - 1 - since * 20,
+              RAIN[0] * glow,
+              RAIN[1] * glow,
+              RAIN[2] * glow,
+              a,
+            );
+          }
         }
-      }
-      continue;
-    }
-    for (let k = 0; k < len; k++) {
-      const yy = y - k;
-      if (yy > groundY) {
         continue;
       }
-      view.blend(
-        x - (drift / speed) * k,
-        yy,
-        RAIN[0] * glow,
-        RAIN[1] * glow,
-        RAIN[2] * glow,
-        (0.35 + 0.25 * near) * (1 - k / len),
-      );
+      const row = sy(f, y);
+      if (row < -8 || row > view.height) {
+        continue;
+      }
+      const len = 3 + 4 * near;
+      for (let j = 0; j < len; j++) {
+        const yy = row - j;
+        if (yy > groundY) {
+          continue;
+        }
+        view.blend(
+          col - ((drift * near) / speed) * j,
+          yy,
+          RAIN[0] * glow,
+          RAIN[1] * glow,
+          RAIN[2] * glow,
+          (0.35 + 0.25 * near) * (1 - j / len),
+        );
+      }
     }
-  }
+  });
 }
 
 function snow(f: Frame, world: World, amount: number, wind: number): void {
   const view = f.view;
-  const count = Math.round(FLAKES * amount * (view.width / 240));
   const glow = 0.55 + 0.45 * f.lighting.daylight;
-  for (let i = 0; i < count; i++) {
-    const h0 = hash2(i, 81);
-    const h1 = hash2(i, 82);
-    const near = 0.4 + 0.6 * hash2(i, 83);
-    const speed = SNOW_FALL * (0.5 + near);
-    const span = view.height + 20;
-    const cycle = span / speed;
-    const t = mod(f.time + h0 * cycle, cycle);
-    const y = -10 + t * speed;
-    const sway = Math.sin(f.time * (0.8 + h1) + i) * 4 * near;
-    const x = mod(h1 * view.width + wind * 30 * t + sway, view.width + 20) - 10;
-    const groundY = sy(f, world.surface.height(x - f.cx));
-    if (y > groundY) {
-      continue;
+  // Flakes fall from above the highest the view can show to below the lowest the ground lies.
+  const top = f.extent.top + 10;
+  const fall = top + 30;
+  const count = Math.round(((FLAKES * fall) / FLAKE_FALL) * amount);
+  stretches(f, 10, (k) => {
+    for (let i = 0; i < count; i++) {
+      const h0 = hash3(i, k, 81);
+      const h1 = hash3(i, k, 82);
+      const near = 0.4 + 0.6 * hash3(i, k, 83);
+      const speed = SNOW_FALL * (0.5 + near);
+      const cycle = fall / speed;
+      const t = mod(f.time + h0 * cycle, cycle);
+      const y = top - t * speed;
+      const sway = Math.sin(f.time * (0.8 + h1) + i) * 4 * near;
+      const x = k * TILE + mod(h1 * TILE + wind * 30 * t + sway, TILE);
+      if (y < world.surface.height(x)) {
+        continue;
+      }
+      const col = sx(f, x);
+      const row = sy(f, y);
+      const a = 0.55 + 0.4 * near;
+      view.blend(col, row, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a);
+      if (near > 0.8) {
+        view.blend(col + 1, row, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a * 0.6);
+        view.blend(col, row + 1, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a * 0.6);
+      }
     }
-    const a = 0.55 + 0.4 * near;
-    view.blend(x, y, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a);
-    if (near > 0.8) {
-      view.blend(x + 1, y, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a * 0.6);
-      view.blend(x, y + 1, SNOW[0] * glow, SNOW[1] * glow, SNOW[2] * glow, a * 0.6);
-    }
-  }
+  });
 }
 
 /**
@@ -166,21 +196,28 @@ function fireflies(f: Frame, world: World): void {
   }
   const view = f.view;
   const count = Math.round(FIREFLIES * amount);
-  for (let i = 0; i < count; i++) {
-    const h = hash3(i, 91, world.seed);
-    // A slow wander above the grass behind the cut.
-    const x = mod(h * 1.7 + noise1(f.time * 0.05 + i * 13.1, 7) * 0.8, 1) * view.width;
-    const y = f.cam.horizon + 10 - noise1(f.time * 0.07 + i * 5.3, 9) * 70;
-    if (y > f.ground - 2) {
-      continue;
+  // Height (mm) of the horizon: the eye's.
+  const horizon = f.ground - f.cam.horizon;
+  stretches(f, 10, (k) => {
+    for (let i = 0; i < count; i++) {
+      const h = hash3(i, k, world.seed);
+      const n = i + k * FIREFLIES;
+      // A slow wander above the grass behind the cut.
+      const x = (k + mod(h * 1.7 + noise1(f.time * 0.05 + n * 13.1, 7) * 0.8, 1)) * TILE;
+      const y = horizon - 10 + noise1(f.time * 0.07 + n * 5.3, 9) * 70;
+      if (y < 2) {
+        continue;
+      }
+      // Each glows up and fades over a couple of seconds, then rests dark.
+      const phase = mod(f.time / (2.6 + h * 1.4) + h, 1);
+      const blink = phase < 0.35 ? Math.sin((phase / 0.35) * Math.PI) : 0;
+      if (blink < 0.05) {
+        continue;
+      }
+      const col = sx(f, x);
+      const row = sy(f, y);
+      view.glow(col, row, 3.2, [150, 230, 90], 0.9 * blink);
+      view.add(col, row, 120 * blink, 200 * blink, 80 * blink);
     }
-    // Each glows up and fades over a couple of seconds, then rests dark.
-    const phase = mod(f.time / (2.6 + h * 1.4) + h, 1);
-    const blink = phase < 0.35 ? Math.sin((phase / 0.35) * Math.PI) : 0;
-    if (blink < 0.05) {
-      continue;
-    }
-    view.glow(x, y, 3.2, [150, 230, 90], 0.9 * blink);
-    view.add(x, y, 120 * blink, 200 * blink, 80 * blink);
-  }
+  });
 }

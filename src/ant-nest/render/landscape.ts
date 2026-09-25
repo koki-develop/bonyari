@@ -152,7 +152,7 @@ export class Meadow {
     dt: number,
     time: number,
   ): void {
-    const key = `${view.width}x${view.height}@${ground}`;
+    const key = `${view.width}x${view.height}@${cam.cx},${ground}`;
     this.sinceDrawn += dt;
     if (key === this.key && this.sinceDrawn < 0.12) {
       return;

@@ -46,7 +46,7 @@ const overlay = new Overlay({
   onSound: (on) => audio.setEnabled(on),
 });
 
-new Input(canvas, world, renderer, {
+new Input(canvas, world, renderer.viewport, {
   activity: () => {
     overlay.activity();
     audio.wake();
@@ -69,6 +69,7 @@ runLoop({
   advance: (dt) => {
     world.update(dt * timescale);
     renderer.observe(world);
+    audio.listen(renderer.viewport.middle, renderer.viewport.zoom);
     audio.update(world, dt);
     sinceSave += dt;
     if (sinceSave >= SAVE_INTERVAL) {

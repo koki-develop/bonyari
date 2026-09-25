@@ -1,15 +1,25 @@
 import { WildlifeChorus } from "../../shared/audio/chorus.ts";
 import { AudioEngineBase, type Loop, MAX_CADENCE } from "../../shared/audio/engine-base.ts";
 import { chain, filter, gainNode, impulseResponse } from "../../shared/audio/synth.ts";
-import { clamp, clamp01 } from "../../shared/core/math.ts";
+import { clamp, clamp01, smoothstep } from "../../shared/core/math.ts";
 import { noise1 } from "../../shared/core/random.ts";
 import { SURFACE } from "../sim/geometry.ts";
 import type { World } from "../sim/world.ts";
 import { buildSoundBank, type SoundBank } from "./bank.ts";
 
 const SPEED_OF_SOUND = 343;
-/** Where the listening ear is pressed into the soil (mm): in the upper nest. */
+/** Where the listening ear is pressed into the soil (mm) in the view the screen opens on: in the upper nest. */
 const EAR = { x: 0, y: -70 };
+/**
+ * Zoomed in this far from the opening view, the ear is pressed where the
+ * view looks; in between, part of the way there.
+ */
+const CLOSE_ZOOM = 2;
+/** Shallowest (mm below the ground) and farthest to either side the ear goes. */
+const EAR_TOP = -4;
+const EAR_REACH = 110;
+/** Seconds the ear takes to move most of the way to where it is asked to go. */
+const EAR_GLIDE = 0.6;
 /** What lives around the ground: a lawn by a wood, a few houses. */
 const HABITAT = { rural: 0.8, houses: 0.25, fields: 0.3 } as const;
 /**
@@ -58,6 +68,9 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
   private feet!: Loop;
   private feetPan!: StereoPannerNode;
   private time = 0;
+  /** Where the ear is pressed into the soil (mm), and where it is going. */
+  private readonly ear = { ...EAR };
+  private readonly earGoal = { ...EAR };
 
   constructor(seed: number) {
     super(seed, 0xa27);
@@ -98,8 +111,22 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
     this.feet = this.loop(ctx, pink, "bandpass", 1500, 0.7, this.feetPan);
   }
 
+  /**
+   * Leans in to listen where the view looks at (`look`, mm), the more the
+   * closer it is zoomed (`zoom` times the opening view).
+   */
+  listen(look: { x: number; y: number }, zoom: number): void {
+    const k = smoothstep(1, CLOSE_ZOOM, zoom);
+    this.earGoal.x = EAR.x + (clamp(look.x, -EAR_REACH, EAR_REACH) - EAR.x) * k;
+    this.earGoal.y = EAR.y + (Math.min(EAR_TOP, look.y) - EAR.y) * k;
+  }
+
   /** Follows the world after it advanced by `elapsed` real seconds. */
   update(world: World, elapsed: number): void {
+    // The ear moves on while the sound is off, so it is where the view is when it comes back.
+    const glide = 1 - Math.exp(-elapsed / EAR_GLIDE);
+    this.ear.x += (this.earGoal.x - this.ear.x) * glide;
+    this.ear.y += (this.earGoal.y - this.ear.y) * glide;
     const run = this.running();
     if (!run) {
       return;
@@ -133,8 +160,9 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
 
   /** Pan and loudness of a sound at (x, y) mm, as the ear hears it. */
   private at(x: number, y: number): { pan: number; gain: number } {
-    const d = Math.hypot(x - EAR.x, y - EAR.y);
-    return { pan: clamp((x - EAR.x) / 110, -0.9, 0.9), gain: 1 / (1 + d / 55) };
+    const ear = this.ear;
+    const d = Math.hypot(x - ear.x, y - ear.y);
+    return { pan: clamp((x - ear.x) / 110, -0.9, 0.9), gain: 1 / (1 + d / 55) };
   }
 
   /**
@@ -217,7 +245,7 @@ export class AudioEngine extends AudioEngineBase<SoundBank> {
     }
     const level = RUSTLE * Math.sqrt(busy);
     this.feet.gain.gain.setTargetAtTime(Math.min(RUSTLE * 4, level), now, 0.6);
-    const pan = busy > 0 ? clamp((sumX / busy - EAR.x) / 110, -0.8, 0.8) : 0;
+    const pan = busy > 0 ? clamp((sumX / busy - this.ear.x) / 110, -0.8, 0.8) : 0;
     this.feetPan.pan.setTargetAtTime(pan, now, 0.8);
   }
 

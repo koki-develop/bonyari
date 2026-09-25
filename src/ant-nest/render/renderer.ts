@@ -1,5 +1,5 @@
 import type { RGB } from "../../shared/core/color.ts";
-import { clamp, clamp01, DEG } from "../../shared/core/math.ts";
+import { clamp01, DEG } from "../../shared/core/math.ts";
 import { Cover } from "../../shared/render/cover.ts";
 import { PixelDisplay } from "../../shared/render/display.ts";
 import { computeLighting, type Lighting } from "../../shared/render/lighting.ts";
@@ -17,6 +17,7 @@ import { drawPlants } from "./plants.ts";
 import { SoilPainter } from "./soil.ts";
 import { AntSprites } from "./sprites.ts";
 import { drawBrood, drawGroundItems, drawNestItems } from "./things.ts";
+import { Viewport } from "./viewport.ts";
 import { drawSnowCover, drawWeather } from "./weather.ts";
 
 /** Focal length (art px) that shows the cut, a quarter meter off, at a pixel to the millimeter. */
@@ -38,12 +39,15 @@ const UNDERGROUND: RGB = [0.96, 0.95, 0.93];
 /**
  * Composes a frame: the sky and the land far off, the grass behind the cut,
  * the cut face of the soil with the nest in it, and the ants, brood and
- * crumbs; then scales the art pixels up to the display.
+ * crumbs; then scales the art pixels up to the display, as large and over
+ * whatever part of the section the viewport shows.
  */
 export class Renderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly display: PixelDisplay;
-  layout!: Layout;
+  private layout!: Layout;
+  /** What part of the section the canvas shows, and how large. */
+  readonly viewport = new Viewport();
   private readonly cam = new Pinhole();
   private readonly shade = new Shade();
   private readonly cover = new Cover();
@@ -56,8 +60,6 @@ export class Renderer {
   private readonly land: ReturnType<typeof plantLand>;
   private readonly seed: number;
   private hiddenColumns = new Uint8Array(0);
-  /** Rows the view is dragged down by (negative: up), on screens too short for the whole nest. */
-  private pan = 0;
 
   constructor(canvas: HTMLCanvasElement, world: World) {
     this.canvas = canvas;
@@ -74,11 +76,10 @@ export class Renderer {
     }
     const layout = computeLayout(deviceWidth, deviceHeight, this.canvas.clientWidth || deviceWidth);
     this.layout = layout;
-    this.display.resize(deviceWidth, deviceHeight, layout.width, layout.height, layout.scale);
-    this.pan = clamp(this.pan, -layout.panDown, layout.panUp);
-    // The soil is kept for every row the view can be dragged to.
-    this.soil.resize(layout.width, layout.cx, layout.ground - layout.panDown - layout.height);
-    this.hiddenColumns = new Uint8Array(layout.width).fill(1);
+    this.display.sizeCanvas(deviceWidth, deviceHeight);
+    this.viewport.setLayout(layout);
+    // The soil is kept for all of the section the view can show.
+    this.soil.resize(layout.extent);
   }
 
   /** Takes note of what happened in the world's last update, for what it sets moving. */
@@ -86,31 +87,18 @@ export class Renderer {
     this.particles.observe(world);
   }
 
-  /** Drags the view by `rows` art pixels (positive: down, toward the sky). */
-  panBy(rows: number): void {
-    const l = this.layout;
-    this.pan = clamp(this.pan + rows, -l.panDown, l.panUp);
-  }
-
-  /** Screen row of the ground level now. */
-  private get ground(): number {
-    return this.layout.ground + Math.round(this.pan);
-  }
-
-  /** The section position (mm) under a point in CSS pixels on the canvas. */
-  toWorld(cssX: number, cssY: number): { x: number; y: number } {
-    const art = this.display.toArt(cssX, cssY);
-    return { x: art.x - this.layout.cx, y: this.ground - art.y };
-  }
-
   render(world: World, dt: number, time: number): void {
-    const layout = this.layout;
+    const place = this.viewport.placement();
+    this.display.place(place.width, place.height, place.scale, place.offsetX, place.offsetY);
     const view = this.display.screen;
+    if (this.hiddenColumns.length !== view.width) {
+      this.hiddenColumns = new Uint8Array(view.width).fill(1);
+    }
     const env = world.env;
-    const ground = this.ground;
+    const ground = place.ground;
     const cam = this.cam;
-    cam.configure(layout.width, layout.height, ground - EYE, FOCAL);
-    cam.cx = layout.cx;
+    cam.configure(view.width, view.height, ground - EYE, FOCAL);
+    cam.cx = place.cx;
     cam.pos = 0;
     cam.eye = EYE / 1000;
     cam.heading = HEADING;
@@ -123,8 +111,9 @@ export class Renderer {
 
     const frame: Frame = {
       view,
-      cx: layout.cx,
+      cx: place.cx,
       ground,
+      extent: this.layout.extent,
       time,
       light: this.faceLight(world, lighting),
       lighting,
@@ -136,7 +125,7 @@ export class Renderer {
     this.meadow.update(world, cam, this.shade, lighting, ground, view, dt, time);
     this.meadow.draw(view);
     this.soil.update(world);
-    this.soil.draw(view, world, ground, UNDERGROUND, frame.light, time);
+    this.soil.draw(view, world, place.cx, ground, UNDERGROUND, frame.light, time);
     drawSnowCover(frame, world);
     const inside: Frame = { ...frame, light: UNDERGROUND };
     drawNestItems(inside, world);

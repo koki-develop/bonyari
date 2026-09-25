@@ -37,19 +37,46 @@ export class PixelDisplay {
     return deviceWidth === this.deviceWidth && deviceHeight === this.deviceHeight;
   }
 
-  /** Sizes the canvas in device pixels and the framebuffer to `width` × `height` art pixels. */
+  /**
+   * Sizes the canvas in device pixels and the framebuffer to `width` ×
+   * `height` art pixels, centered on the canvas.
+   */
   resize(deviceWidth: number, deviceHeight: number, width: number, height: number, scale: number) {
+    this.sizeCanvas(deviceWidth, deviceHeight);
+    this.place(
+      width,
+      height,
+      scale,
+      Math.floor((width * scale - deviceWidth) / 2),
+      Math.floor((height * scale - deviceHeight) / 2),
+    );
+  }
+
+  /** Sizes the canvas in device pixels, leaving the framebuffer to `place`. */
+  sizeCanvas(deviceWidth: number, deviceHeight: number): void {
     this.deviceWidth = deviceWidth;
     this.deviceHeight = deviceHeight;
     this.canvas.width = deviceWidth;
     this.canvas.height = deviceHeight;
+  }
+
+  /**
+   * Sizes the framebuffer to `width` × `height` art pixels of `scale` device
+   * pixels, with its top left corner `offsetX` and `offsetY` device pixels up
+   * and left of the canvas's. The framebuffer is made anew only when its size
+   * changes.
+   */
+  place(width: number, height: number, scale: number, offsetX: number, offsetY: number): void {
     this.scale = scale;
+    this.offsetX = offsetX;
+    this.offsetY = offsetY;
+    if (this.screen && this.screen.width === width && this.screen.height === height) {
+      return;
+    }
     this.screen = new Surface(width, height);
     this.art.width = width;
     this.art.height = height;
     this.image = new ImageData(new Uint8ClampedArray(this.screen.data.buffer), width, height);
-    this.offsetX = Math.floor((width * scale - deviceWidth) / 2);
-    this.offsetY = Math.floor((height * scale - deviceHeight) / 2);
   }
 
   /** Converts a position in CSS pixels on the canvas to art pixels. */

@@ -15,6 +15,7 @@ import {
 } from "../sim/geometry.ts";
 import { covers, type Horizons, horizonAt, type Stone, STONE_CELL } from "../sim/soil.ts";
 import type { World } from "../sim/world.ts";
+import type { Extent } from "./layout.ts";
 import {
   CLAY,
   DUST,
@@ -89,14 +90,13 @@ export class SoilPainter {
   private seed = 0;
   private built = false;
 
-  /**
-   * Covers the screen columns `width` wide with x = 0 at column `cx`, down to
-   * world height `yBottom` (the lowest the view can show).
-   */
-  resize(width: number, cx: number, yBottom: number): void {
+  /** Covers every millimeter of `extent`, the part of the section the view can show. */
+  resize(extent: Extent): void {
+    const x0 = Math.floor(extent.left) - 1;
+    const width = Math.ceil(extent.right) + 1 - x0;
     this.width = width;
-    this.x0 = -cx;
-    this.rows = Math.max(1, Math.ceil(HEAP_TOP - yBottom) + 1);
+    this.x0 = x0;
+    this.rows = Math.max(1, Math.ceil(HEAP_TOP - extent.bottom) + 1);
     this.albedo = new Uint32Array(width * this.rows);
     this.marks = new Uint8Array(width * this.rows);
     this.stoneOf = new Int32Array(width * this.rows).fill(-1);
@@ -456,13 +456,15 @@ export class SoilPainter {
   }
 
   /**
-   * Draws the cut face into `view` with the ground level at row `ground`:
-   * below the ground lit by `under`, the heap above it by `above` (channel
-   * multipliers); darker where the soil is wet, frosted where it is frozen.
+   * Draws the cut face into `view` with x = 0 at column `cx` and the ground
+   * level at row `ground`: below the ground lit by `under`, the heap above it
+   * by `above` (channel multipliers); darker where the soil is wet, frosted
+   * where it is frozen.
    */
   draw(
     view: Framebuffer,
     world: World,
+    cx: number,
     ground: number,
     under: RGB,
     above: RGB,
@@ -472,6 +474,10 @@ export class SoilPainter {
     const w = view.width;
     const climate = world.climate;
     const weather = world.env.weather.state;
+    // Cache column of screen column 0, and the screen columns the cache holds.
+    const shift = -cx - this.x0;
+    const from = Math.max(0, -shift);
+    const to = Math.min(w, this.width - shift);
     for (let sy = 0; sy < view.height; sy++) {
       const r = this.yTop - (ground - sy);
       if (r < 0 || r >= this.rows) {
@@ -492,19 +498,20 @@ export class SoilPainter {
       const frozen = depth > -2 ? clamp01(-climate.temperatureAt(Math.max(0, depth)) / 3) : 0;
       const row = r * this.width;
       const out = sy * w;
-      for (let sx = 0; sx < w; sx++) {
-        const a = this.albedo[row + sx];
+      for (let sx = from; sx < to; sx++) {
+        const col = sx + shift;
+        const a = this.albedo[row + col];
         if (a === 0) {
           continue;
         }
-        const up = yc > this.columns[sx].ground;
+        const up = yc > this.columns[col].ground;
         let red = (a & 255) * (up ? ar : ur);
         let green = ((a >>> 8) & 255) * (up ? ag : ug);
         let blue = ((a >>> 16) & 255) * (up ? ab : ub);
         if (frozen > 0) {
           // Rime: a pale, cold film with glints of ice.
           const glint =
-            hash2(sx * 17 + this.seed, sy * 29 + Math.floor(time * 0.5)) < 0.06 ? 0.55 : 0.14;
+            hash2(col * 17 + this.seed, r * 29 + Math.floor(time * 0.5)) < 0.06 ? 0.55 : 0.14;
           const f = frozen * glint;
           red += (225 - red) * f;
           green += (234 - green) * f;
