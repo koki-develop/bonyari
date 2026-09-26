@@ -9,5 +9,6 @@ export default defineConfig({
     trainWindow: resolve(import.meta.dirname, "train-window/index.html"),
     kyudo: resolve(import.meta.dirname, "kyudo/index.html"),
     antNest: resolve(import.meta.dirname, "ant-nest/index.html"),
+    settlement: resolve(import.meta.dirname, "settlement/index.html"),
   },
 });
