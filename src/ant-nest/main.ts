@@ -1,6 +1,5 @@
 import "../shared/base.css";
 import "../shared/ui/work.css";
-import "./style.css";
 import { randomSeed } from "../shared/core/random.ts";
 import { observeDeviceSize, runLoop } from "../shared/platform/loop.ts";
 import { ScreenWake } from "../shared/platform/wake-lock.ts";

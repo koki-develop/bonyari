@@ -21,18 +21,27 @@ export interface Airplane {
   seed: number;
 }
 
+/** What besides meteors crosses a work's sky: a world before flight has no airplanes. */
+export interface SkyTraffic {
+  airplanes: boolean;
+}
+
+export const MODERN_SKY: SkyTraffic = { airplanes: true };
+
 /**
  * Shooting stars and passing airplanes. Their directions are relative to the
  * view (azimuth 0 is straight ahead), so every work sees them wherever it looks.
  */
 export class SkyEvents {
   private readonly rng: Rng;
+  private readonly traffic: SkyTraffic;
   readonly shootingStars: ShootingStar[] = [];
   readonly airplanes: Airplane[] = [];
   private nextPlaneIn: number;
 
-  constructor(seed: number) {
+  constructor(seed: number, traffic: SkyTraffic = MODERN_SKY) {
     this.rng = new Rng(seed ^ 0xf17e);
+    this.traffic = traffic;
     this.nextPlaneIn = this.rng.range(20, 90);
   }
 
@@ -68,6 +77,9 @@ export class SkyEvents {
   }
 
   private updateAirplanes(dt: number): void {
+    if (!this.traffic.airplanes) {
+      return;
+    }
     this.nextPlaneIn -= dt;
     if (this.nextPlaneIn <= 0) {
       this.nextPlaneIn = this.rng.range(80, 220);

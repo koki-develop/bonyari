@@ -40,6 +40,8 @@ export function runLoop(handlers: LoopHandlers): void {
   };
 
   const frame = (now: number): void => {
+    // The next frame is asked for first, so a frame that throws does not stop the work for good.
+    requestAnimationFrame(frame);
     pendingDt += advance(now);
     skip = drawCost > SLOW_FRAME_MS ? !skip : false;
     if (!skip) {
@@ -48,7 +50,6 @@ export function runLoop(handlers: LoopHandlers): void {
       drawCost = drawCost * 0.95 + (performance.now() - t0) * 0.05;
       pendingDt = 0;
     }
-    requestAnimationFrame(frame);
   };
 
   let hiddenTimer = 0;

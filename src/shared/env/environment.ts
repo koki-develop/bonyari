@@ -3,7 +3,7 @@ import { asRecord, isFiniteNumber } from "../core/validate.ts";
 import { computeSky, type SkyState } from "./astro.ts";
 import { Clock, type Timekeeping } from "./clock.ts";
 import type { SeasonState } from "./season.ts";
-import { SkyEvents } from "./sky-events.ts";
+import { MODERN_SKY, SkyEvents, type SkyTraffic } from "./sky-events.ts";
 import { buildStarField, type Star } from "./stars.ts";
 import {
   type LightningStrike,
@@ -44,6 +44,7 @@ export class Environment<S extends SeasonState = SeasonState> {
     clock: Clock,
     weather: Weather,
     seasonOf: (yearFraction: number) => S,
+    traffic: SkyTraffic,
   ) {
     this.seed = seed;
     this.clock = clock;
@@ -51,14 +52,14 @@ export class Environment<S extends SeasonState = SeasonState> {
     this.seasonOf = seasonOf;
     this.season = seasonOf(clock.yearFraction);
     this.sky = computeSky(clock.calendarDayOfYear, clock.hour, clock.days);
-    this.skyEvents = new SkyEvents(seed);
+    this.skyEvents = new SkyEvents(seed, traffic);
     this.stars = buildStarField(seed);
   }
 
   /**
    * New conditions at `days`, keeping time as `timekeeping` says, with the
    * weather settled into `weather` or one picked for the season, and leaning
-   * as `tendency` says from then on.
+   * as `tendency` says from then on; `traffic` says what may cross the sky.
    */
   static create<S extends SeasonState>(
     seed: number,
@@ -67,6 +68,7 @@ export class Environment<S extends SeasonState = SeasonState> {
     seasonOf: (yearFraction: number) => S,
     weather?: WeatherKind,
     tendency: WeatherTendency = USUAL_WEATHER,
+    traffic: SkyTraffic = MODERN_SKY,
   ): Environment<S> {
     const clock = new Clock(days, timekeeping);
     return new Environment(
@@ -74,6 +76,7 @@ export class Environment<S extends SeasonState = SeasonState> {
       clock,
       Weather.create(seed, seasonOf(clock.yearFraction), weather, tendency),
       seasonOf,
+      traffic,
     );
   }
 
@@ -83,12 +86,14 @@ export class Environment<S extends SeasonState = SeasonState> {
     timekeeping: Timekeeping,
     seasonOf: (yearFraction: number) => S,
     tendency: WeatherTendency = USUAL_WEATHER,
+    traffic: SkyTraffic = MODERN_SKY,
   ): Environment<S> {
     return new Environment(
       seed,
       new Clock(snapshot.days, timekeeping),
       Weather.restore(seed, snapshot.weather, tendency),
       seasonOf,
+      traffic,
     );
   }
 

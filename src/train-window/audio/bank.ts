@@ -339,7 +339,7 @@ export async function buildSoundBank(sampleRate: number, seed: number): Promise<
     render(2.2, airRelease),
     render(1.3, doorSlide),
     render(0.8, stopThunk),
-    Promise.all([true, false].map((near) => render(7, thunder(near)))),
+    Promise.all([true, false].map((near) => render(9, thunder(near)))),
     Promise.all([0, 1].map((v) => render(2.2, fireworkBoom(v)))),
     render(1.8, crackle),
     Promise.all([0, 1, 2, 3].map((v) => render(0.06, dropTick(v)))),

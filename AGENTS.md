@@ -23,7 +23,7 @@
 - `src/shared/`: 作品どうしで共有するもの
   - `base.css`: 全ページ共通の色トークンとリセット。`ui/`: 作品ページの開始画面と右上の操作ボタン（`work.css` / `overlay.ts`）
   - `core/`: 色・数学・乱数・ソフトウェアフレームバッファ
-  - `env/`: 時計・天体・星・季節・天気・空の出来事をまとめた `Environment`。季節は作品ごとに `computeSeason` の結果を広げて使う。雨の多さは作品ごとに `WeatherTendency` で変えられる
+  - `env/`: 時計・天体・星・季節・天気・空の出来事をまとめた `Environment`。季節は作品ごとに `computeSeason` の結果を広げて使う。雨の多さは作品ごとに `WeatherTendency` で、空を飛行機が飛ぶかは `SkyTraffic` で変えられる
   - `render/`: 空・光・空気遠近・木、`Pinhole` カメラ、整数倍拡大の表示（`PixelDisplay`）
   - `audio/`: 合成の部品、天気と生き物の声、音のエンジンの土台（`AudioEngineBase`）
   - `platform/`: 表示中と非表示中の両方で世界を進めるループ、画面スリープの抑止

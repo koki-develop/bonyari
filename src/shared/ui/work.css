@@ -34,6 +34,7 @@ body {
   background: radial-gradient(ellipse at center, rgb(5 7 14 / 45%), rgb(5 7 14 / 78%));
   cursor: pointer;
   transition: opacity 1.2s ease;
+  touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -63,6 +64,13 @@ body {
 .start-note {
   font-size: 13px;
   color: var(--ink-dim);
+}
+
+.start-hint {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--ink-dim);
+  text-align: center;
 }
 
 @keyframes breathe {
@@ -99,6 +107,7 @@ body {
   background: var(--panel);
   color: var(--ink);
   cursor: pointer;
+  touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
 

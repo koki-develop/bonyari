@@ -13,8 +13,9 @@ export function noiseBuffer(
   seed: number,
 ): AudioBuffer {
   const length = Math.floor(ctx.sampleRate * seconds);
-  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
-  const data = buffer.getChannelData(0);
+  const fade = Math.min(length >> 3, Math.floor(ctx.sampleRate * LOOP_FADE));
+  // Generated a little past the loop's end; the overflow is folded into the head.
+  const data = new Float32Array(length + fade);
   const r = new Rng(seed);
   // Paul Kellet's pink filter state.
   let b0 = 0;
@@ -25,8 +26,7 @@ export function noiseBuffer(
   let b5 = 0;
   let b6 = 0;
   let brown = 0;
-  let peak = 0;
-  for (let i = 0; i < length; i++) {
+  for (let i = 0; i < data.length; i++) {
     const white = r.next() * 2 - 1;
     let v: number;
     if (color === "white") {
@@ -45,19 +45,57 @@ export function noiseBuffer(
       v = brown;
     }
     data[i] = v;
+  }
+  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+  const loop = buffer.getChannelData(0);
+  loop.set(data.subarray(0, length));
+  foldTail(loop, data.subarray(length));
+  let peak = 0;
+  for (const v of loop) {
     peak = Math.max(peak, Math.abs(v));
   }
-  // Normalize, and crossfade the ends so the loop is seamless.
-  const fade = Math.min(length >> 3, Math.floor(ctx.sampleRate * 0.05));
   for (let i = 0; i < length; i++) {
-    data[i] /= peak;
-  }
-  for (let i = 0; i < fade; i++) {
-    const t = i / fade;
-    const j = length - fade + i;
-    data[j] = data[j] * (1 - t) + data[i] * t;
+    loop[i] /= peak;
   }
   return buffer;
+}
+
+/** Seconds over which a loop's overflow is crossfaded into its head. */
+const LOOP_FADE = 0.05;
+
+/**
+ * Makes `head` loop seamlessly given `tail`, the samples that would follow its
+ * end: the head fades in from the tail, so the sample after the last is the
+ * tail's first, as if the sound went on. Equal-power, for uncorrelated sound.
+ */
+function foldTail(head: Float32Array, tail: Float32Array): void {
+  const fade = Math.min(tail.length, head.length);
+  for (let i = 0; i < fade; i++) {
+    const a = ((i + 0.5) / fade) * (Math.PI / 2);
+    head[i] = head[i] * Math.sin(a) + tail[i] * Math.cos(a);
+  }
+}
+
+/**
+ * Cuts a rendered sound down to a seamless loop of `seconds`: render it
+ * somewhat longer (a fraction of a second is enough), and what runs past the
+ * end is crossfaded into the start.
+ */
+export function seamlessLoop(buffer: AudioBuffer, seconds: number): AudioBuffer {
+  const rate = buffer.sampleRate;
+  const length = Math.floor(rate * seconds);
+  const out = new AudioBuffer({
+    numberOfChannels: buffer.numberOfChannels,
+    length,
+    sampleRate: rate,
+  });
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    const loop = out.getChannelData(c);
+    loop.set(data.subarray(0, length));
+    foldTail(loop, data.subarray(length));
+  }
+  return out;
 }
 
 /** A stereo impulse response: exponentially decaying noise with a darkening tail. */
@@ -116,7 +154,10 @@ export function envelope(
   return g;
 }
 
-/** A one-shot noise source (not looped), started at `start`. */
+/**
+ * A noise source playing for `duration` from `start`. A burst longer than the
+ * buffer loops it (noise buffers loop seamlessly) rather than stopping short.
+ */
 export function noiseBurst(
   ctx: BaseAudioContext,
   buffer: AudioBuffer,
@@ -126,7 +167,13 @@ export function noiseBurst(
 ): AudioBufferSourceNode {
   const src = ctx.createBufferSource();
   src.buffer = buffer;
-  src.start(start, offset % Math.max(0.001, buffer.duration - duration - 0.01), duration);
+  const room = buffer.duration - duration - 0.01;
+  if (room > 0.001) {
+    src.start(start, offset % room, duration);
+  } else {
+    src.loop = true;
+    src.start(start, (offset * buffer.duration) % buffer.duration, duration);
+  }
   return src;
 }
 
